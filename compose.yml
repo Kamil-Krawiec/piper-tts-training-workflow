@@ -1,0 +1,26 @@
+services:
+  trainer:
+    user: "${PIPER_UID:-1000}:${PIPER_GID:-1000}"
+    build:
+      context: .
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    ports:
+      - "127.0.0.1:7860:7860"
+    volumes:
+      - ${PIPER_HOST_DATA_DIR:-./data}:/data
+    environment:
+      PIPER_DATA_DIR: /data
+      GRADIO_TEMP_DIR: /data/tmp
+      HOME: /tmp
+      PORT: "7860"
+    restart: unless-stopped
+
+  piper-api:
+    image: kamilkrawiec/piper-openai-tts:v1.0.2
+    profiles: ["inference"]
+    ports:
+      - "127.0.0.1:${PIPER_API_HOST_PORT:-5000}:5000"
+    volumes:
+      - ./data/piper-voices:/data
+    restart: unless-stopped

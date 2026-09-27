@@ -1,0 +1,10 @@
+Dzisiaj sprawdzam, czy można wytrenować Piper TTS na własnym głosie.
+Najpierw przygotuję dane treningowe i sprawdzę każde nagranie.
+Czy trzydzieści minut materiału wystarczy do pierwszego eksperymentu?
+W tym zdaniu pojawi się liczba 12.5 oraz skrót na przykład: dr. Nowak.
+Później porównam krótszy i dłuższy zbiór nagrań.
+Wszystkie pliki pozostaną na moim komputerze.
+Piper działa lokalnie i nie wysyła mojego głosu do chmury.
+To jest próbka, którą mogę nagrać jeszcze raz.
+Sprawdzam jakość dźwięku przed rozpoczęciem treningu.
+Na końcu wyeksportuję model do formatu ONNX.
