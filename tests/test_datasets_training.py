@@ -73,6 +73,10 @@ class DatasetTests(unittest.TestCase):
 
 
 class TrainingCommandTests(unittest.TestCase):
+    def test_missing_finetune_checkpoint_returns_validation_help(self):
+        errors = validate_training_config({"training_mode": "finetune", "checkpoint": None}, cuda_available=False)
+        self.assertIn("Fine-tuning requires an existing checkpoint file.", errors)
+
     def test_finetuning_uses_checkpoint_but_scratch_uses_only_optional_warmstart(self):
         base = {
             "voice_name": "pl_PL-kamil-medium", "csv_path": "/data/metadata.csv",

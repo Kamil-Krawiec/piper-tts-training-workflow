@@ -33,6 +33,7 @@ COPY README.md THIRD_PARTY_NOTICES.md /app/
 RUN useradd --uid 10001 --create-home trainer \
     && mkdir -p /data \
     && chown -R trainer:trainer /app /data
+ENV NUMBA_CACHE_DIR=/tmp/numba-cache
 USER trainer
 
 EXPOSE 7860

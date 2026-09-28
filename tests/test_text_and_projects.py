@@ -46,6 +46,15 @@ class PromptParsingTests(unittest.TestCase):
 
 
 class ProjectStoreTests(unittest.TestCase):
+    def test_project_lookup_treats_arbitrary_ids_as_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ProjectStore(Path(temp))
+            project = store.create_project("Studio")
+
+            self.assertTrue(store.has_project(project["id"]))
+            self.assertFalse(store.has_project("not-a-project-id"))
+            self.assertFalse(store.has_project("00000000-0000-0000-0000-000000000000"))
+
     def test_source_queue_and_sample_survive_reopen_and_prompt_edit(self):
         with tempfile.TemporaryDirectory() as temp:
             store = ProjectStore(Path(temp))

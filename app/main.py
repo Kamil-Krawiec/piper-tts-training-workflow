@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +15,15 @@ import gradio as gr
 
 from app.audio import inspect_wav, normalize_audio
 from app.bundles import export_bundle, import_bundle
-from app.checkpoints import curated_checkpoints, download_checkpoint
+from app.checkpoints import download_checkpoint
 from app.datasets import create_dataset
 from app.export import export_onnx, package_model, publish_model, validate_voice_name
-from app.inference import api_health, api_synthesize, synthesize
+from app.inference import synthesize
 from app.projects import ProjectStore
 from app.text import estimate_text, parse_prompts, prompt_recommendation
 from app.training import TrainingJobs, batch_size_for, validate_training_config
+from app.workflow import WorkflowProgress
+from app.ui import APP_CSS, step_heading
 
 
 DATA_DIR = Path(os.environ.get("PIPER_DATA_DIR", "/data"))
@@ -29,6 +31,7 @@ STORE = ProjectStore(DATA_DIR)
 JOBS = TrainingJobs(DATA_DIR)
 BUILTIN_PROMPTS = Path("/app/prompts/pl_PL_demo.txt")
 PROMPT_DIR = Path("/app/prompts") if Path("/app/prompts").exists() else Path(__file__).resolve().parent.parent / "prompts"
+
 
 
 def _projects() -> list[dict[str, Any]]:
@@ -40,6 +43,8 @@ def _project_choices() -> list[tuple[str, str]]:
 
 
 def _dataset_dirs(project_id: str) -> list[Path]:
+    if not STORE.has_project(project_id):
+        return []
     root = STORE.project_dir(project_id) / "datasets"
     return sorted([path for path in root.iterdir() if path.is_dir() and (path / "metadata.csv").exists()], key=lambda path: path.name) if root.exists() else []
 
@@ -50,7 +55,13 @@ def _dataset_choices(project_id: str) -> list[tuple[str, str]]:
         manifest_path = path / "dataset.json"
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            label = f"{path.name} — {manifest.get('sample_count', '?')} samples / {manifest.get('total_seconds', 0) / 60:.1f} min"
+            count = manifest.get("sample_count", "?")
+            target = manifest.get("target_seconds")
+            target_label = "All accepted" if target is None else f"{round(target / 60)} min target"
+            if path.name.startswith("imported-"):
+                target_label = f"Imported · {target_label}"
+            saved = datetime.fromtimestamp(path.stat().st_mtime).strftime("%d %b %H:%M")
+            label = f"{target_label} · {count} sample{'s' if count != 1 else ''} / {_duration_label(manifest.get('total_seconds', 0))} · {saved}"
         else:
             label = path.name
         choices.append((label, path.name))
@@ -58,6 +69,8 @@ def _dataset_choices(project_id: str) -> list[tuple[str, str]]:
 
 
 def _selected_dataset(project_id: str, dataset_name: str) -> Path:
+    if not STORE.has_project(project_id):
+        raise ValueError("Create or select a saved project first")
     if not dataset_name or Path(dataset_name).name != dataset_name:
         raise ValueError("Select a dataset")
     path = STORE.project_dir(project_id) / "datasets" / dataset_name
@@ -67,7 +80,7 @@ def _selected_dataset(project_id: str, dataset_name: str) -> Path:
 
 
 def evaluation_choices(project_id: str, dataset_name: str):
-    if not project_id or not dataset_name:
+    if not STORE.has_project(project_id) or not dataset_name:
         return []
     dataset = _selected_dataset(project_id, dataset_name)
     index_path = dataset / "sample-index.json"
@@ -88,25 +101,20 @@ def load_evaluation_prompt(project_id: str, dataset_name: str, sample_id: str):
         return "", None, f"Could not load test prompt: {error}"
 
 
-def _sample_rows(project_id: str, status_filter: str = "all", query: str = "") -> list[list[Any]]:
-    rows = []
-    needle = query.casefold().strip()
+def _sample_choices(project_id: str) -> list[tuple[str, str]]:
+    if not STORE.has_project(project_id):
+        return []
+    choices = []
     for sample in STORE.list_samples(project_id):
-        if status_filter != "all" and sample["status"] != status_filter:
-            continue
-        if needle and needle not in sample["text"].casefold():
-            continue
-        quality = sample["quality"]
-        rows.append([
-            sample["id"], sample["text"], sample["status"], round(sample["duration_seconds"], 2),
-            quality.get("peak_dbfs", ""), "; ".join(quality.get("warnings", [])), sample.get("audio_file") or sample["raw_file"],
-        ])
-    return rows
+        warning = " · check quality" if sample["quality"].get("warnings") else ""
+        label = f"{sample['status'].capitalize()} · {sample['duration_seconds']:.1f}s · {sample['text'][:80]}{warning}"
+        choices.append((label, sample["id"]))
+    return choices
 
 
 def _project_summary(project_id: str | None) -> str:
-    if not project_id:
-        return "Create or select a project to begin."
+    if not STORE.has_project(project_id):
+        return "**Your workspace is ready.** Start with Step 1: choose or create a project."
     project = STORE.get_project(project_id)
     counts = project["sample_counts"]
     accepted = counts.get("accepted", {}).get("seconds", 0)
@@ -116,14 +124,17 @@ def _project_summary(project_id: str | None) -> str:
     accepted_count = counts.get("accepted", {}).get("count", 0)
     rejected_count = counts.get("rejected", {}).get("count", 0)
     review_count = counts.get("review", {}).get("count", 0)
-    coverage = min(100, int(accepted / 3600 * 100))
+    needs_attention = []
+    if review_count:
+        needs_attention.append(f"**{review_count}** to review")
+    if rejected_count:
+        needs_attention.append(f"**{rejected_count}** rejected")
+    details = " · ".join(needs_attention)
     return (
-        f"### {project['name']}\n"
-        f"Language: `{project['language']}` · eSpeak: `{project['espeak_voice']}` · Sample rate: `22050 Hz`\n\n"
-        f"Prompts: **{prompt_total}** · Recorded: **{recorded} / {prompt_total}** · "
-        f"Accepted: **{accepted_count}** · Review: **{review_count}** · Rejected: **{rejected_count}**\n\n"
-        f"Accepted audio: **{_clock(accepted)}** · 30 min target: **{'reached' if accepted >= 1800 else f'{accepted / 1800 * 100:.0f}%'}** · "
-        f"60 min target: **{coverage}%**"
+        f"**Project: {project['name']}** · {project['language']}  \n"
+        f"**{recorded}/{prompt_total}** prompts recorded · **{accepted_count}** accepted · "
+        f"**{_duration_label(accepted)}** accepted audio"
+        + (f" · {details}" if details else "")
     )
 
 
@@ -132,7 +143,13 @@ def _clock(seconds: float) -> str:
     return f"{total // 3600:02}:{(total % 3600) // 60:02}:{total % 60:02}"
 
 
+def _duration_label(seconds: float) -> str:
+    return f"{seconds:.0f} sec" if seconds < 60 else f"{seconds / 60:.1f} min"
+
+
 def _queue_rows(project_id: str, search: str = "") -> list[list[Any]]:
+    if not STORE.has_project(project_id):
+        return []
     rows = []
     needle = search.casefold().strip()
     seen: set[str] = set()
@@ -165,14 +182,21 @@ def _source_content(upload: str | None, pasted: str) -> tuple[str, str]:
 def create_project(name: str, language: str, espeak: str):
     try:
         project = STORE.create_project(name, language.strip() or "pl_PL", espeak.strip() or "pl")
-        return gr.update(choices=_project_choices(), value=project["id"]), _project_summary(project["id"]), "Project created."
+        return (
+            gr.update(choices=_project_choices(), value=project["id"]),
+            _project_summary(project["id"]), "Project created.", gr.update(open=False),
+        )
     except Exception as error:
-        return gr.update(), "", f"Could not create project: {error}"
+        return gr.update(), "", f"Could not create project: {error}", gr.update(open=True)
 
 
 def select_project(project_id: str | None):
-    if not project_id:
-        return "Create or select a project.", [], gr.update(choices=[], value=None), [], "", [], 0, "", "0 / 0", None
+    if not STORE.has_project(project_id):
+        return (
+            _project_summary(None), [], gr.update(choices=[], value=None), gr.update(choices=[], value=None),
+            "", gr.update(choices=[], value=None), 0,
+            "Create a project above to begin.", "0 / 0", None,
+        )
     project = STORE.get_project(project_id)
     datasets = _dataset_choices(project_id)
     active_id = STORE.get_active_prompt(project_id)
@@ -182,7 +206,20 @@ def select_project(project_id: str | None):
     return (
         _project_summary(project_id), _queue_rows(project_id),
         gr.update(choices=datasets, value=datasets[0][1] if datasets else None),
-        _sample_rows(project_id), "", _queue_rows(project_id), *cursor,
+        gr.update(choices=_sample_choices(project_id), value=None), "",
+        gr.update(choices=datasets, value=datasets[0][1] if datasets else None), *cursor,
+    )
+
+
+def select_project_state(project_id: str | None):
+    selected = project_id if STORE.has_project(project_id) else None
+    run_options = run_choices(selected)
+    model_options = model_choices(selected)
+    return (
+        *select_project(selected),
+        gr.update(choices=run_options, value=run_options[0][1] if run_options else None),
+        gr.update(choices=model_options, value=model_options[0][1] if model_options else None),
+        gr.update(choices=model_options, value=None),
     )
 
 
@@ -190,7 +227,7 @@ def load_app_state(current_project_id: str | None):
     choices = _project_choices()
     available = {value for _, value in choices}
     selected = current_project_id if current_project_id in available else (choices[0][1] if choices else None)
-    return (gr.update(choices=choices, value=selected), *select_project(selected))
+    return (gr.update(choices=choices, value=selected), *select_project_state(selected))
 
 
 def preview_source(project_id: str, upload: str | None, pasted: str, mode: str, rate: int):
@@ -239,23 +276,10 @@ def select_prompt_pack(name: str | None):
     return str(path), f"Selected prompt pack: {name}. Click Preview and save queue."
 
 
-def restore_source_queue(project_id: str):
+def save_queue(project_id: str, rows: list[list[Any]] | None, search: str = ""):
     try:
-        project = STORE.get_project(project_id)
-        if not project["source"]:
-            raise ValueError("This project has no imported source to restore.")
-        source_file = STORE.project_dir(project_id) / "source" / "original.txt"
-        text = source_file.read_text(encoding="utf-8")
-        ids = STORE.import_prompts(project_id, project["source"]["filename"], text, project["source"]["mode"])
-        prompts = parse_prompts(text, project["source"]["mode"])
-        rows = [[prompt_id, prompt, len(prompt.split()), "Ready"] for prompt_id, prompt in zip(ids, prompts)]
-        return rows, "Queue restored from the original imported source."
-    except Exception as error:
-        return _queue_rows(project_id), f"Could not restore source queue: {error}"
-
-
-def save_queue(project_id: str, rows: list[list[Any]] | None):
-    try:
+        if search.strip():
+            raise ValueError("Clear the prompt search before saving edits so the full queue is shown.")
         values = [{"id": str(row[0]), "text": str(row[1])} for row in (rows or []) if len(row) >= 2]
         STORE.save_prompt_queue(project_id, values)
         return _queue_rows(project_id), _project_summary(project_id), "Prompt queue saved."
@@ -263,25 +287,9 @@ def save_queue(project_id: str, rows: list[list[Any]] | None):
         return rows, _project_summary(project_id), f"Could not save prompt queue: {error}"
 
 
-def prompt_action(project_id: str, prompt_index: int, action: str, left: str, right: str):
-    try:
-        if action == "up":
-            STORE.move_prompt(project_id, prompt_index, -1)
-        elif action == "down":
-            STORE.move_prompt(project_id, prompt_index, 1)
-        elif action == "delete":
-            queue = STORE.get_project(project_id)["prompts"]
-            STORE.delete_prompt(project_id, queue[prompt_index]["id"])
-        elif action == "split":
-            STORE.split_prompt(project_id, prompt_index, left, right)
-        elif action == "merge":
-            STORE.merge_prompts(project_id, prompt_index)
-        return _queue_rows(project_id), _project_summary(project_id), "Queue updated."
-    except Exception as error:
-        return _queue_rows(project_id), _project_summary(project_id), f"Queue action failed: {error}"
-
-
 def current_prompt(project_id: str, index: int):
+    if not STORE.has_project(project_id):
+        return 0, "Choose or create a project in Step 1 first.", "0 / 0", None
     prompts = STORE.get_project(project_id)["prompts"]
     if not prompts:
         return 0, "Import or paste text to create a recording queue.", "0 / 0", None
@@ -291,6 +299,8 @@ def current_prompt(project_id: str, index: int):
 
 
 def resume_prompt(project_id: str):
+    if not STORE.has_project(project_id):
+        return current_prompt(project_id, 0)
     prompts = STORE.get_project(project_id)["prompts"]
     active_id = STORE.get_active_prompt(project_id)
     index = next((i for i, prompt in enumerate(prompts) if prompt["id"] == active_id), 0)
@@ -299,7 +309,7 @@ def resume_prompt(project_id: str):
 
 def record_sample(project_id: str, index: int, prompt_id: str | None, recording_path: str | None, decision: str):
     if not project_id or not recording_path:
-        return "Record audio with the microphone first.", None, _project_summary(project_id), _sample_rows(project_id) if project_id else [], index, _queue_rows(project_id) if project_id else []
+        return "Record audio with the microphone first.", None, _project_summary(project_id), gr.update(choices=_sample_choices(project_id)), index, _queue_rows(project_id), gr.update()
     try:
         prompts = STORE.get_project(project_id)["prompts"]
         if not prompts:
@@ -321,14 +331,15 @@ def record_sample(project_id: str, index: int, prompt_id: str | None, recording_
         STORE.add_sample(project_id, prompt["id"], str(raw_target.relative_to(project_root)), quality["duration_seconds"], sample_status, quality, str(wav_target))
         current_index = next(position for position, item in enumerate(prompts) if item["id"] == prompt_id)
         next_index = min(current_index + (1 if decision == "accept" else 0), len(prompts) - 1)
-        prompt_text = prompts[next_index]["text"] if prompts else ""
         state = f"{sample_status.upper()} · {_clock(quality['duration_seconds'])}\n" + ("\n".join(quality["warnings"]) if quality["warnings"] else "Quality checks look good.")
-        return state, str(wav_target), _project_summary(project_id), _sample_rows(project_id), next_index, _queue_rows(project_id)
+        return state, str(wav_target), _project_summary(project_id), gr.update(choices=_sample_choices(project_id), value=None), next_index, _queue_rows(project_id), None
     except Exception as error:
-        return f"Could not save recording: {error}", None, _project_summary(project_id), _sample_rows(project_id), index, _queue_rows(project_id)
+        return f"Could not save recording: {error}", None, _project_summary(project_id), gr.update(choices=_sample_choices(project_id)), index, _queue_rows(project_id), gr.update()
 
 
 def load_sample_audio(project_id: str, sample_id: str):
+    if not sample_id:
+        return None, "Select a sample row to listen to its recording."
     try:
         for sample in STORE.list_samples(project_id):
             if sample["id"] == sample_id:
@@ -345,9 +356,9 @@ def load_sample_audio(project_id: str, sample_id: str):
 def review_sample(project_id: str, sample_id: str, status: str):
     try:
         STORE.set_sample_status(project_id, sample_id, status)
-        return _sample_rows(project_id), _project_summary(project_id), f"Sample marked {status}.", _queue_rows(project_id)
+        return gr.update(choices=_sample_choices(project_id), value=sample_id), _project_summary(project_id), f"Sample marked {status}.", _queue_rows(project_id)
     except Exception as error:
-        return _sample_rows(project_id), _project_summary(project_id), str(error), _queue_rows(project_id)
+        return gr.update(choices=_sample_choices(project_id), value=sample_id), _project_summary(project_id), str(error), _queue_rows(project_id)
 
 
 def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
@@ -365,9 +376,10 @@ def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
         info = {key: project[key] for key in ("name", "language", "espeak_voice")}
         info.update({"sample_rate": 22050, "dataset_id": dataset_id})
         (output / "project-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
-        minutes = manifest["total_seconds"] / 60
         choices = _dataset_choices(project_id)
-        return gr.update(choices=choices, value=dataset_id), gr.update(choices=choices, value=dataset_id), f"Created {manifest['sample_count']} samples ({minutes:.1f} min), seed 42.", _project_summary(project_id)
+        count = manifest["sample_count"]
+        status = f"Created {count} sample{'s' if count != 1 else ''} ({_duration_label(manifest['total_seconds'])}), seed 42."
+        return gr.update(choices=choices, value=dataset_id), gr.update(choices=choices, value=dataset_id), status, _project_summary(project_id)
     except Exception as error:
         return gr.update(), gr.update(), f"Dataset creation failed: {error}", _project_summary(project_id)
 
@@ -472,6 +484,8 @@ def _hash_if_exists(path: Path) -> str | None:
 
 
 def _run_status_text(project_id: str):
+    if not STORE.has_project(project_id):
+        return "Choose or create a project in Step 1 first."
     status = JOBS.status(project_id)
     if not status:
         return "No training runs yet."
@@ -479,44 +493,26 @@ def _run_status_text(project_id: str):
 
 
 def cancel_training(project_id: str):
+    if not STORE.has_project(project_id):
+        return "Choose or create a project in Step 1 first.", "No training runs yet."
     cancelled = JOBS.cancel(project_id)
     return "Training process stopped." if cancelled else "No active training process to stop.", _run_status_text(project_id)
 
 
 def run_choices(project_id: str):
+    if not STORE.has_project(project_id):
+        return []
     root = STORE.project_dir(project_id) / "runs"
-    return [(path.name, path.name) for path in sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True) if path.is_dir()] if root.exists() else []
-
-
-def inspect_run_config(project_id: str, run_id: str):
-    try:
-        path = STORE.project_dir(project_id) / "runs" / Path(run_id).name / "run-config.json"
-        if not path.is_file():
-            raise ValueError("Run configuration is unavailable")
-        return json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False, indent=2)
-    except Exception as error:
-        return f"Could not read run configuration: {error}"
-
-
-def compare_run_configs(project_id: str, run_a: str, run_b: str):
-    try:
-        config_a = json.loads(inspect_run_config(project_id, run_a))
-        config_b = json.loads(inspect_run_config(project_id, run_b))
-        fields = (
-            ("Dataset", "dataset_id"), ("Dataset manifest hash", "dataset_manifest_hash"),
-            ("Training mode", "training_mode"), ("Base checkpoint SHA-256", "base_checkpoint_hash"),
-            ("Random seed", "seed"), ("Piper model name", "voice_name"),
-            ("Sample rate", "sample_rate"), ("eSpeak voice", "espeak_voice"),
-            ("Internal validation split", "validation_split"), ("Test examples", "num_test_examples"),
-            ("Piper revision", "piper_revision"),
-        )
-        rows = [f"| Setting | Run A | Run B | Same |", "|---|---|---|---|"]
-        for label, key in fields:
-            left, right = config_a.get(key, "—"), config_b.get(key, "—")
-            rows.append(f"| {label} | `{left}` | `{right}` | {'yes' if left == right else 'no'} |")
-        return "\n".join(rows)
-    except Exception as error:
-        return f"Could not compare runs: {error}"
+    choices = []
+    for path in sorted(root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True) if root.exists() else []:
+        if not path.is_dir():
+            continue
+        config_path = path / "run-config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+        mode = "Fine-tune" if config.get("training_mode") == "finetune" else "Scratch" if config.get("training_mode") == "scratch" else "Run"
+        saved = datetime.fromtimestamp(path.stat().st_mtime).strftime("%d %b %H:%M")
+        choices.append((f"{mode} · {saved} · {path.name[:8]}", path.name))
+    return choices
 
 
 def export_run(project_id: str, run_id: str, voice_name: str):
@@ -543,6 +539,8 @@ def export_run(project_id: str, run_id: str, voice_name: str):
 
 
 def model_choices(project_id: str):
+    if not STORE.has_project(project_id):
+        return []
     root = STORE.project_dir(project_id) / "models"
     pairs = []
     if root.exists():
@@ -586,19 +584,6 @@ def publish_selected(model_path: str):
         return f"Publish failed: {error}"
 
 
-def diagnostics():
-    try:
-        import torch
-        cuda = f"available — {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else "unavailable"
-    except Exception:
-        cuda = "unavailable"
-    ffmpeg = "OK" if shutil.which("ffmpeg") else "missing"
-    espeak = "OK" if shutil.which("espeak-ng") else "missing"
-    piper_training = subprocess.run([os.sys.executable, "-m", "piper.train", "fit", "--help"], capture_output=True, text=True, timeout=20).returncode == 0
-    api = "connected" if api_health() else "optional / disconnected"
-    return f"Application: OK\nffmpeg: {ffmpeg}\neSpeak NG: {espeak}\nPiper training: {'OK' if piper_training else 'missing'}\nCUDA: {cuda}\nPiper API: {api}\nData directory: {DATA_DIR}"
-
-
 def prepare_training_summary(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: int, seed: int, max_epochs: int):
     try:
         dataset = _selected_dataset(project_id, dataset_name)
@@ -637,205 +622,300 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
         return "", f"Could not prepare training summary: {error}"
 
 
+def workflow_progress(project_id: str | None) -> WorkflowProgress:
+    if not STORE.has_project(project_id):
+        return WorkflowProgress()
+    project = STORE.get_project(project_id)
+    return WorkflowProgress(
+        project=True, prompts=len(project["prompts"]),
+        accepted=project["sample_counts"].get("accepted", {}).get("count", 0),
+        datasets=len(_dataset_dirs(project_id)), runs=len(run_choices(project_id)),
+        models=len(model_choices(project_id)),
+    )
+
+
+def step_availability(project_id: str | None):
+    progress = workflow_progress(project_id)
+    return tuple(gr.update(interactive=progress.blocked_reason(step) is None) for step in range(1, 7))
+
+
+def navigate_step(project_id: str | None, current: int, target: int):
+    reason = workflow_progress(project_id).blocked_reason(target)
+    if reason:
+        return gr.update(selected=current), f"**Before continuing:** {reason}"
+    return gr.update(selected=target), ""
+
+
+def reset_project_view(project_id: str | None):
+    text, mode = "", "prose"
+    if STORE.has_project(project_id):
+        project = STORE.get_project(project_id)
+        if project["source"]:
+            source = STORE.project_dir(project_id) / "source" / "original.txt"
+            text = source.read_text(encoding="utf-8") if source.is_file() else ""
+            mode = project["source"]["mode"]
+    return text, None, mode, None, _run_status_text(project_id)
+
+
+def refresh_runs(project_id: str | None):
+    choices = run_choices(project_id)
+    return (
+        _run_status_text(project_id),
+        gr.update(choices=choices, value=choices[0][1] if choices else None),
+    )
+
+
 def build_app() -> gr.Blocks:
-    theme = gr.themes.Soft(primary_hue="blue", secondary_hue="slate")
-    with gr.Blocks(title="Piper Voice Trainer", theme=theme, analytics_enabled=False) as demo:
-        gr.Markdown("# Piper Voice Trainer\nRecord known prompts, prepare a reproducible dataset, and train a Piper voice locally. Recordings and models stay in the mounted data directory.")
-        with gr.Row():
-            project_select = gr.Dropdown(label="Current project", choices=_project_choices(), value=(_projects()[0]["id"] if _projects() else None), allow_custom_value=True, scale=3)
-            project_status = gr.Markdown(_project_summary(project_select.value))
-        with gr.Tabs():
-            with gr.Tab("Project"):
-                with gr.Row():
-                    project_name = gr.Textbox(label="Project / voice name", value="Kamil PL")
-                    language = gr.Textbox(label="Language", value="pl_PL")
-                    espeak = gr.Textbox(label="eSpeak voice", value="pl")
+    theme = gr.themes.Soft(primary_hue="teal", secondary_hue="slate", neutral_hue="slate").set(
+        block_label_background_fill="transparent", block_label_text_color="#334953",
+        body_text_color="#243743", body_text_color_subdued="#52616f",
+    )
+    projects = _projects()
+    initial_project = projects[0]["id"] if projects else None
+    progress = workflow_progress(initial_project)
+    forward_buttons = []
+    back_buttons = []
+    with gr.Blocks(title="Piper Voice Studio", theme=theme, css=APP_CSS, analytics_enabled=False, elem_id="voice-app") as demo:
+        gr.HTML(
+            "<div class='eyebrow'>PIPER · LOCAL VOICE TRAINING</div>"
+            "<h1>Train your Piper voice</h1>"
+            "<p>Record, prepare a dataset, train, and export a Piper voice. Your work stays on this machine.</p>",
+            elem_id="studio-header",
+        )
+        project_status = gr.Markdown(_project_summary(initial_project), elem_id="project-context")
+        workflow_status = gr.Markdown(elem_id="workflow-message")
+        with gr.Tabs(selected=1, elem_id="workflow") as workflow_tabs:
+            with gr.Tab("1 · Project", id=1, elem_classes="step-page") as project_tab:
+                step_heading(1, "Choose or create a project", "A project keeps your prompts, recordings, datasets, and training runs together. Choose a saved voice or start a new one.")
+                project_select = gr.Dropdown(label="Choose an existing project", choices=_project_choices(), value=initial_project, info="Select a project by name. No project ID is needed.")
+                with gr.Accordion("Or create a new project", open=not projects) as project_create_panel:
+                    project_name = gr.Textbox(label="Project name", placeholder="e.g. My Polish narrator", max_lines=1)
+                    with gr.Accordion("Language settings · Polish by default", open=False):
+                        with gr.Row():
+                            language = gr.Textbox(label="Language code", value="pl_PL", info="pl_PL for Polish, en_US for American English.")
+                            espeak = gr.Textbox(label="eSpeak voice", value="pl", info="Use the pronunciation voice for your language, e.g. pl or en-us.")
                     create_button = gr.Button("Create project", variant="primary")
                 create_status = gr.Markdown()
-                gr.Markdown("#### Recording source\nPaste prose or upload a `.txt` file. Preview creates a saved queue but never starts recording.")
                 with gr.Row():
-                    prompt_upload = gr.File(label="Source text file (.txt)", file_types=[".txt"], type="filepath")
-                    prompt_pack = gr.Dropdown(label="Built-in prompt pack", choices=[path.name for path in PROMPT_DIR.glob("*.txt")], value=None, allow_custom_value=True)
-                    builtin_button = gr.Button("Use selected prompt pack")
-                prompt_text = gr.Textbox(label="Paste source text", lines=6, placeholder="Paste Polish prose or one prompt per line")
-                with gr.Row():
-                    parse_mode = gr.Radio([("Prose / auto split", "prose"), ("One prompt per line", "lines")], value="prose", label="Parsing mode")
-                    speaking_rate = gr.Slider(60, 240, value=140, step=5, label="Assumed speaking rate (words/minute)")
-                    preview_button = gr.Button("Preview and save queue", variant="primary")
+                    resume_button = gr.Button("Resume saved progress")
+                    import_shortcut = gr.Button("Import a dataset ZIP")
+                with gr.Row(elem_classes="step-footer"):
+                    continue_project = gr.Button("Continue to Step 2 · Prepare text →", variant="primary")
+                forward_buttons.append((continue_project, 1, 2))
+
+            with gr.Tab("2 · Text", id=2, interactive=progress.blocked_reason(2) is None, elem_classes="step-page") as text_tab:
+                step_heading(2, "Prepare your recording text", "Paste text or choose a file, then save the prompts you will read.")
+                prompt_text = gr.Textbox(label="Paste your source text", lines=6, placeholder="Paste prose, or put one recording prompt on each line.")
+                with gr.Accordion("Use a .txt file or a built-in prompt pack instead", open=False):
+                    gr.Markdown("An uploaded file takes priority over pasted text. Clear the file to use your pasted text again.")
+                    prompt_upload = gr.File(label="Source text file", file_types=[".txt"], type="filepath")
+                    prompt_pack = gr.Dropdown(label="Built-in prompt pack", choices=sorted(path.name for path in PROMPT_DIR.glob("*.txt")), value=None)
+                    builtin_button = gr.Button("Load prompt pack")
+                    source_status = gr.Markdown()
+                parse_mode = gr.Radio([("Prose — split into sentences", "prose"), ("One prompt per line", "lines")], value="prose", label="How should the text become prompts?")
+                preview_button = gr.Button("Preview & save prompt queue", variant="primary")
                 estimate = gr.Markdown()
                 queue_status = gr.Markdown()
-                queue_search = gr.Textbox(label="Search prompts")
-                queue_table = gr.Dataframe(headers=["Prompt ID", "Text", "Words", "Status"], datatype=["str", "str", "number", "str"], type="array", interactive=True, row_count=(0, "dynamic"), label="Editable prompt queue")
-                with gr.Row():
-                    save_queue_button = gr.Button("Save queue edits")
-                    restore_queue_button = gr.Button("Restore queue from original source")
-                with gr.Row():
-                    prompt_index = gr.Number(value=0, precision=0, label="Prompt row (0-based)", scale=1)
-                    move_up = gr.Button("Move up")
-                    move_down = gr.Button("Move down")
-                    split_left = gr.Textbox(label="Split: first part")
-                    split_right = gr.Textbox(label="Split: second part")
-                    split_button = gr.Button("Split row")
-                    merge_button = gr.Button("Merge with next")
-                    delete_prompt_button = gr.Button("Delete row", variant="stop")
+                gr.Markdown("### Check your prompts\nEdit the **Text** column if needed, then save your changes.")
+                queue_table = gr.Dataframe(headers=["Prompt ID", "Text", "Words", "Status"], datatype=["str", "str", "number", "str"], type="array", interactive=True, static_columns=[0, 2, 3], row_count=(0, "dynamic"), col_count=(4, "fixed"), max_height=320, wrap=True, column_widths=[120, 460, 70, 140], label="Prompt queue", elem_id="prompt-queue")
+                save_queue_button = gr.Button("Save text edits")
                 queue_action_status = gr.Markdown()
-            with gr.Tab("Record"):
-                gr.Markdown("Read the displayed prompt once. Accept stores a normalized WAV; a warning sends it to review. Re-recording the prompt marks the previous sample as superseded while keeping its files.")
+                with gr.Row(elem_classes="step-footer"):
+                    back_text = gr.Button("← Step 1 · Project")
+                    continue_text = gr.Button("Continue to Step 3 · Record →", variant="primary")
+                back_buttons.append((back_text, 1))
+                forward_buttons.append((continue_text, 2, 3))
+
+            with gr.Tab("3 · Record", id=3, interactive=progress.blocked_reason(3) is None, elem_classes="step-page") as record_tab:
+                step_heading(3, "Record your voice", "Read one prompt at a time. Listen, then accept the take or record it again.")
+                active_prompt_id = gr.State(value=None)
+                prompt_progress = gr.Markdown("0 / 0")
+                current_text = gr.Markdown("Prepare a prompt queue in Step 2 first.", elem_id="recording-prompt")
+                gr.Markdown("Use a quiet room and keep the same microphone distance. Play your take before accepting it.")
+                recording = gr.Audio(label="Your microphone recording", sources=["microphone"], type="filepath")
                 with gr.Row():
-                    prompt_position = gr.Number(value=0, precision=0, label="Queue position", scale=1)
-                    active_prompt_id = gr.State(value=None)
-                    prev_button = gr.Button("Previous")
-                    next_button = gr.Button("Next")
-                    prompt_progress = gr.Markdown("0 / 0")
-                current_text = gr.Markdown("Create or import a prompt queue first.")
-                recording = gr.Audio(label="Record from microphone", sources=["microphone"], type="filepath")
-                with gr.Row():
-                    accept_button = gr.Button("Accept & next", variant="primary")
-                    review_button = gr.Button("Save for review")
-                    reject_button = gr.Button("Reject recording", variant="stop")
-                    rerecord_button = gr.Button("Record again")
+                    accept_button = gr.Button("Accept & next prompt", variant="primary")
+                    review_button = gr.Button("Save take for review")
+                    reject_button = gr.Button("Reject take", variant="stop")
                 record_result = gr.Markdown()
-                sample_player = gr.Audio(label="Saved recording", interactive=False)
-            with gr.Tab("Samples"):
-                sample_filter = gr.Dropdown(["all", "accepted", "review", "rejected", "superseded"], value="all", label="Filter")
-                sample_search = gr.Textbox(label="Search prompt text")
-                sample_table = gr.Dataframe(headers=["Sample ID", "Prompt", "Status", "Seconds", "Peak dBFS", "Warnings", "Audio path"], datatype=["str", "str", "str", "number", "str", "str", "str"], type="array", interactive=False)
+                with gr.Accordion("Listen to the last saved take", open=False):
+                    sample_player = gr.Audio(label="Last saved recording", interactive=False)
+                prompt_position = gr.State(value=0)
                 with gr.Row():
-                    sample_id = gr.Textbox(label="Sample ID to review")
-                    load_sample_button = gr.Button("Play selected sample")
-                    accept_sample_button = gr.Button("Mark accepted")
-                    flag_sample_button = gr.Button("Mark for review")
-                    reject_sample_button = gr.Button("Reject sample")
-                sample_review_status = gr.Markdown()
-                sample_audio_player = gr.Audio(label="Selected sample", interactive=False)
-            with gr.Tab("Dataset"):
-                gr.Markdown("Datasets use accepted normalized samples only. Duration targets are estimates based on actual recorded sample lengths; 30 and 60 minute subsets use the same deterministic seed.")
-                with gr.Row():
-                    duration_target = gr.Dropdown(["15 minutes", "30 minutes", "60 minutes", "All accepted", "Custom duration"], value="30 minutes", label="Dataset size")
-                    custom_minutes_input = gr.Number(value=45, precision=0, minimum=1, maximum=10000, label="Custom target minutes", visible=False)
-                    create_dataset_button = gr.Button("Create dataset", variant="primary")
+                    prev_button = gr.Button("← Previous prompt")
+                    next_button = gr.Button("Next prompt →")
+                with gr.Accordion("Review saved recordings", open=False):
+                    gr.Markdown("Only accepted takes enter a dataset. Choose a recording to listen or change its status.")
+                    sample_select = gr.Dropdown(label="Saved recording", choices=_sample_choices(initial_project), value=None, filterable=True)
+                    sample_audio_player = gr.Audio(label="Selected recording", interactive=False)
+                    with gr.Row():
+                        accept_sample_button = gr.Button("Mark accepted")
+                        flag_sample_button = gr.Button("Mark for review")
+                        reject_sample_button = gr.Button("Mark rejected", variant="stop")
+                    sample_review_status = gr.Markdown()
+                gr.Markdown("Continue when you have accepted recordings. You can return to record more later.")
+                with gr.Row(elem_classes="step-footer"):
+                    back_record = gr.Button("← Step 2 · Text")
+                    continue_record = gr.Button("Continue to Step 4 · Build dataset →", variant="primary")
+                back_buttons.append((back_record, 2))
+                forward_buttons.append((continue_record, 3, 4))
+
+            with gr.Tab("4 · Dataset", id=4, interactive=progress.blocked_reason(4) is None, elem_classes="step-page") as dataset_tab:
+                step_heading(4, "Build your training dataset", "Turn accepted recordings into a reproducible dataset, or import a dataset ZIP from another machine. The dataset is what you will train on in the next step.")
+                gr.Markdown("### Build from your recordings\nTargets use actual accepted audio duration. If you have less audio than the target, the dataset uses what is available.")
+                duration_target = gr.Dropdown(["15 minutes", "30 minutes", "60 minutes", "All accepted", "Custom duration"], value="30 minutes", label="How much accepted audio should be included?")
+                custom_minutes_input = gr.Number(value=45, precision=0, minimum=1, maximum=10000, label="Custom target (minutes)", visible=False)
+                create_dataset_button = gr.Button("Create dataset from accepted takes", variant="primary")
                 dataset_status = gr.Markdown()
-                dataset_select = gr.Dropdown(label="Dataset", value=None, allow_custom_value=True)
-                with gr.Row():
-                    export_dataset_button = gr.Button("Export dataset ZIP")
-                    dataset_archive = gr.File(label="Download portable dataset")
-                    dataset_import_file = gr.File(label="Import dataset ZIP", file_types=[".zip"], type="filepath")
-                    import_dataset_button = gr.Button("Import bundle")
+                with gr.Accordion("Or import a dataset ZIP", open=False):
+                    gr.Markdown("Use a ZIP exported by this app. Its files and hashes are validated before it becomes available for training.")
+                    dataset_import_file = gr.File(label="Dataset ZIP to import", file_types=[".zip"], type="filepath")
+                    import_dataset_button = gr.Button("Validate & import dataset")
+                gr.Markdown("### Choose the dataset to use")
+                dataset_select = gr.Dropdown(label="Saved dataset", value=None, info="Creating or importing a dataset selects it here and in Step 5.")
                 dataset_transfer_status = gr.Markdown()
-            with gr.Tab("Train"):
-                gr.Markdown("Fine-tuning is the recommended default. Scratch training is a separate workflow and does not use the base checkpoint. Vocoder warm-start initializes compatible vocoder weights without becoming a fine-tuning run.")
-                with gr.Row():
-                    train_dataset = gr.Dropdown(label="Dataset", value=None, allow_custom_value=True)
-                    training_mode = gr.Radio([("Fine-tune existing Piper checkpoint", "finetune"), ("Full training from scratch", "scratch")], value="finetune", label="Training mode")
-                base_select = gr.Dropdown(label="Base checkpoint selector", choices=[item["id"] for item in curated_checkpoints()] + ["Upload or use a local checkpoint"], value="pl_PL-darkman-medium")
-                checkpoint_info = gr.Markdown("**pl_PL-darkman-medium** · Polish · one speaker · medium · 22,050 Hz · cache status shown by the path below · upstream source revision pinned. Curated presets are medium quality; uploaded/local files are your responsibility to validate.")
-                with gr.Row():
-                    base_checkpoint_path = gr.Textbox(label="Checkpoint path (downloaded, uploaded, or local)")
-                    download_checkpoint_button = gr.Button("Download curated checkpoint")
-                checkpoint_upload = gr.File(label="Upload .ckpt", file_types=[".ckpt"], type="filepath")
-                checkpoint_upload_button = gr.Button("Copy uploaded checkpoint to persistent storage")
-                scratch_warning = gr.Markdown("**Scratch training selected.** Small datasets may produce poor results compared with fine-tuning; training is still allowed.", visible=False)
-                warmstart_checkbox = gr.Checkbox(label="Warm-start vocoder from a checkpoint", value=False, visible=False)
+                with gr.Accordion("Download a dataset to train on another machine", open=False):
+                    export_dataset_button = gr.Button("Export selected dataset as ZIP")
+                    dataset_archive = gr.File(label="Download dataset ZIP", interactive=False)
+                with gr.Row(elem_classes="step-footer"):
+                    back_dataset = gr.Button("← Step 3 · Record")
+                    continue_dataset = gr.Button("Continue to Step 5 · Train →", variant="primary")
+                back_buttons.append((back_dataset, 3))
+                forward_buttons.append((continue_dataset, 4, 5))
+
+            with gr.Tab("5 · Train", id=5, interactive=progress.blocked_reason(5) is None, elem_classes="step-page") as train_tab:
+                step_heading(5, "Train your Piper voice", "Choose a training mode and review the run settings before starting. Your configuration, checkpoints, and logs are saved with the project.")
+                train_dataset = gr.Dropdown(label="Training dataset", value=None)
+                training_mode = gr.Radio([("Fine-tune an existing voice (recommended)", "finetune"), ("Train a new voice from scratch", "scratch")], value="finetune", label="Training mode")
+                with gr.Group() as finetune_panel:
+                    gr.Markdown("### Starting checkpoint\nFine-tuning needs a compatible Piper **.ckpt** file. For Polish, download the suggested medium voice, or provide your own.")
+                    download_checkpoint_button = gr.Button("Download Polish medium checkpoint")
+                    base_checkpoint_path = gr.Textbox(label="Checkpoint path", placeholder="Download, upload, or enter a local .ckpt path", info="The selected checkpoint is saved with the training run.")
+                    with gr.Accordion("Upload your own checkpoint", open=False):
+                        checkpoint_upload = gr.File(label="Piper .ckpt file", file_types=[".ckpt"], type="filepath")
+                        checkpoint_upload_button = gr.Button("Save uploaded checkpoint")
+                scratch_warning = gr.Markdown("**Training from scratch:** No base voice checkpoint will be used. Small datasets may produce poorer results than fine-tuning.", visible=False)
+                warmstart_checkbox = gr.Checkbox(label="Optionally warm-start the vocoder from a checkpoint", value=False, visible=False)
                 warmstart_path = gr.Textbox(label="Vocoder warm-start checkpoint path", visible=False)
-                with gr.Accordion("Advanced settings", open=False):
+                with gr.Accordion("Device and training settings", open=False):
+                    device = gr.Radio([("Automatic", "auto"), ("CPU", "cpu"), ("NVIDIA GPU / CUDA", "cuda")], value="auto", label="Training device", info="Automatic uses CUDA when available. CPU training can take much longer.")
+                    batch_size = gr.Number(value=0, precision=0, minimum=0, label="Batch size (0 = automatic)")
                     max_epochs = gr.Number(value=1000, precision=0, minimum=1, maximum=100000, label="Maximum epochs")
                     training_seed = gr.Number(value=42, precision=0, minimum=0, label="Random seed")
-                with gr.Row():
-                    device = gr.Radio([("Auto", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")], value="auto", label="Device")
-                    batch_size = gr.Number(value=0, precision=0, label="Batch size (0 = automatic)")
-                    prepare_button = gr.Button("Prepare run summary")
-                    cancel_button = gr.Button("Stop training", variant="stop")
+                gr.Markdown("### Review and start")
+                prepare_button = gr.Button("Review run summary")
                 run_summary = gr.Markdown()
-                train_button = gr.Button("START TRAINING", variant="primary")
+                train_button = gr.Button("Start training", variant="primary")
                 training_status = gr.Markdown()
-                run_status = gr.Code(label="Persisted status and recent logs", language="shell")
-                refresh_run_button = gr.Button("Refresh training status")
-            with gr.Tab("Models"):
-                run_select = gr.Dropdown(label="Training run", value=None, allow_custom_value=True)
-                run_compare_select = gr.Dropdown(label="Second training run for comparison", value=None, allow_custom_value=True)
-                inspect_run_button = gr.Button("Inspect saved run configuration")
-                run_config_view = gr.Code(label="Saved run configuration and exact command", language="json")
-                compare_runs_button = gr.Button("Compare run settings")
-                run_comparison = gr.Markdown()
-                with gr.Row():
-                    model_name = gr.Textbox(label="Safe Piper voice filename", value="pl_PL-kamil-medium")
-                    export_model_button = gr.Button("Export ONNX pair")
-                    model_archive = gr.File(label="Download model ZIP")
-                model_status = gr.Markdown()
-                model_select = gr.Dropdown(label="Exported model", choices=[], value=None, allow_custom_value=True)
-                fixed_test_prompt = gr.Dropdown(label="Fixed held-out test prompt", choices=[], value=None, allow_custom_value=True)
-                load_fixed_prompt_button = gr.Button("Use selected held-out prompt")
-                reference_audio = gr.Audio(label="Original held-out speaker recording", interactive=False)
-                compare_model_select = gr.Dropdown(label="Second model for A/B comparison", choices=[], value=None, allow_custom_value=True)
-                local_test_text = gr.Textbox(label="Text to synthesize locally", value="Dzisiaj sprawdzam własny model głosu.")
-                with gr.Row():
-                    synth_button = gr.Button("Generate local test speech")
-                    compare_button = gr.Button("Compare both models")
-                    publish_button = gr.Button("Publish to Piper API shared directory")
-                synth_audio = gr.Audio(label="Generated speech", interactive=False)
-                with gr.Row():
-                    compare_audio_a = gr.Audio(label="Model A", interactive=False)
-                    compare_audio_b = gr.Audio(label="Model B", interactive=False)
-                publish_status = gr.Markdown()
-            with gr.Tab("Test / Deploy"):
-                gr.Markdown("Optional integration with the existing OpenAI-compatible Piper API at `http://piper-api:5000`. Compose publishes exported pairs from `data/piper-voices` into the server's `/data` volume.")
-                api_status = gr.Markdown("Click diagnostics to check the optional Piper API service.")
-                api_text = gr.Textbox(label="Text", value="To jest test mojego własnego modelu głosu.")
-                api_voice = gr.Textbox(label="Voice name", value="pl_PL-kamil-medium")
-                api_test_button = gr.Button("Test through OpenAI API")
-                api_audio = gr.Audio(label="API-generated speech", interactive=False)
-                diagnostics_button = gr.Button("Run diagnostics")
-                diagnostics_text = gr.Code(label="Diagnostics", language="shell")
+                with gr.Accordion("Training progress and controls", open=False) as training_progress_panel:
+                    gr.Markdown("Refresh to see the saved status and latest logs. You can export after the run saves a checkpoint.")
+                    run_status = gr.Code(label="Training status and recent logs", language="shell", value="No training runs yet.")
+                    with gr.Row():
+                        refresh_run_button = gr.Button("Refresh training status")
+                        cancel_button = gr.Button("Stop training", variant="stop")
+                with gr.Row(elem_classes="step-footer"):
+                    back_train = gr.Button("← Step 4 · Dataset")
+                    continue_train = gr.Button("Continue to Step 6 · Export & listen →", variant="primary")
+                back_buttons.append((back_train, 4))
+                forward_buttons.append((continue_train, 5, 6))
 
-        create_button.click(create_project, [project_name, language, espeak], [project_select, project_status, create_status])
-        project_select.change(select_project, project_select, [project_status, queue_table, dataset_select, sample_table, queue_action_status, train_dataset, prompt_position, current_text, prompt_progress, active_prompt_id])
-        builtin_button.click(select_prompt_pack, prompt_pack, [prompt_upload, create_status])
-        preview_button.click(preview_source, [project_select, prompt_upload, prompt_text, parse_mode, speaking_rate], [queue_table, estimate, queue_status, project_status]).then(lambda pid: current_prompt(pid, 0), project_select, [prompt_position, current_text, prompt_progress, active_prompt_id])
-        queue_search.change(lambda pid, search: _queue_rows(pid, search) if pid else [], [project_select, queue_search], queue_table)
-        save_queue_button.click(save_queue, [project_select, queue_table], [queue_table, project_status, queue_action_status]).then(resume_prompt, project_select, [prompt_position, current_text, prompt_progress, active_prompt_id])
-        restore_queue_button.click(restore_source_queue, project_select, [queue_table, queue_action_status]).then(lambda pid: current_prompt(pid, 0), project_select, [prompt_position, current_text, prompt_progress, active_prompt_id])
-        for button, action in ((move_up, "up"), (move_down, "down"), (split_button, "split"), (merge_button, "merge"), (delete_prompt_button, "delete")):
-            button.click(lambda pid, index, left, right, act=action: prompt_action(pid, int(index), act, left, right), [project_select, prompt_index, split_left, split_right], [queue_table, project_status, queue_action_status]).then(resume_prompt, project_select, [prompt_position, current_text, prompt_progress, active_prompt_id])
+            with gr.Tab("6 · Voice", id=6, interactive=progress.blocked_reason(6) is None, elem_classes="step-page") as voice_tab:
+                step_heading(6, "Export and listen to your voice", "Export a saved training checkpoint as a Piper voice, test it locally, and download the model to use in your own applications.")
+                gr.Markdown("### 1. Export a trained voice\nSelect a run with a saved checkpoint. The download contains both the ONNX model and its JSON configuration.")
+                run_select = gr.Dropdown(label="Training run", value=None)
+                model_name = gr.Textbox(label="Voice filename", value="pl_PL-kamil-medium", info="Use letters, numbers, underscores, and hyphens.")
+                export_model_button = gr.Button("Export voice & prepare download", variant="primary")
+                model_status = gr.Markdown()
+                model_archive = gr.File(label="Download voice ZIP", interactive=False)
+                gr.Markdown("### 2. Listen to the exported voice")
+                model_select = gr.Dropdown(label="Exported voice", choices=[], value=None)
+                local_test_text = gr.Textbox(label="Text for your listening test", value="Dzisiaj sprawdzam własny model głosu.", lines=3)
+                synth_button = gr.Button("Generate test speech", variant="primary")
+                synth_audio = gr.Audio(label="Your generated voice", interactive=False)
+                with gr.Accordion("Compare with a recording or another voice", open=False):
+                    fixed_test_prompt = gr.Dropdown(label="Held-out test prompt from the Step 4 dataset", choices=[], value=None)
+                    load_fixed_prompt_button = gr.Button("Load test text & original recording")
+                    reference_audio = gr.Audio(label="Original speaker recording", interactive=False)
+                    compare_model_select = gr.Dropdown(label="Second exported voice", choices=[], value=None)
+                    compare_button = gr.Button("Generate the same text with both voices")
+                    compare_audio_a = gr.Audio(label="First voice", interactive=False)
+                    compare_audio_b = gr.Audio(label="Second voice", interactive=False)
+                with gr.Accordion("Use your voice through the optional Piper API", open=False):
+                    gr.Markdown("Publish the selected voice, then start the API with `docker compose --profile inference up -d`.")
+                    publish_button = gr.Button("Publish selected voice to Piper API")
+                    publish_status = gr.Markdown()
+                gr.Markdown("**Keep improving your voice:** Return to Step 3 to record more, then build a new dataset and train another run. Your earlier runs stay saved.")
+                with gr.Row(elem_classes="step-footer"):
+                    back_voice = gr.Button("← Step 5 · Train")
+                    record_more = gr.Button("Return to Step 3 · Record more")
+                back_buttons.extend([(back_voice, 5), (record_more, 3)])
+        step_tabs = [project_tab, text_tab, record_tab, dataset_tab, train_tab, voice_tab]
+
+        create_button.click(create_project, [project_name, language, espeak], [project_select, project_status, create_status, project_create_panel])
+        project_state_outputs = [
+            project_status, queue_table, dataset_select, sample_select,
+            queue_action_status, train_dataset, prompt_position, current_text,
+            prompt_progress, active_prompt_id, run_select, model_select, compare_model_select,
+        ]
+        stale_text = [estimate, queue_status, source_status, record_result, sample_review_status, dataset_status, dataset_transfer_status, run_summary, training_status, model_status, publish_status, workflow_status]
+        stale_files = [sample_player, sample_audio_player, dataset_archive, dataset_import_file, model_archive, synth_audio, reference_audio, compare_audio_a, compare_audio_b]
+        project_select.change(select_project_state, project_select, project_state_outputs).then(
+            reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status],
+        ).then(
+            lambda: ("",) * len(stale_text) + (None,) * len(stale_files), outputs=stale_text + stale_files,
+        ).then(step_availability, project_select, step_tabs).then(lambda: gr.update(selected=1), outputs=workflow_tabs)
+        scroll_to_step = "() => { document.getElementById('workflow').scrollIntoView({behavior: 'smooth', block: 'start'}); }"
+        for button, current, target in forward_buttons:
+            button.click(lambda pid, source=current, destination=target: navigate_step(pid, source, destination), project_select, [workflow_tabs, workflow_status]).then(fn=None, js=scroll_to_step)
+        for button, target in back_buttons:
+            source = 6 if button in (back_voice, record_more) else target + 1
+            button.click(lambda pid, current=source, destination=target: navigate_step(pid, current, destination), project_select, [workflow_tabs, workflow_status]).then(fn=None, js=scroll_to_step)
+        resume_button.click(lambda pid: navigate_step(pid, 1, workflow_progress(pid).next_step), project_select, [workflow_tabs, workflow_status]).then(fn=None, js=scroll_to_step)
+        import_shortcut.click(lambda pid: navigate_step(pid, 1, 4), project_select, [workflow_tabs, workflow_status]).then(fn=None, js=scroll_to_step)
+        builtin_button.click(select_prompt_pack, prompt_pack, [prompt_upload, source_status])
+        preview_button.click(lambda pid, upload, pasted, mode: preview_source(pid, upload, pasted, mode, 140), [project_select, prompt_upload, prompt_text, parse_mode], [queue_table, estimate, queue_status, project_status]).then(lambda pid: current_prompt(pid, 0), project_select, [prompt_position, current_text, prompt_progress, active_prompt_id]).then(step_availability, project_select, step_tabs)
+        save_queue_button.click(save_queue, [project_select, queue_table], [queue_table, project_status, queue_action_status]).then(resume_prompt, project_select, [prompt_position, current_text, prompt_progress, active_prompt_id]).then(step_availability, project_select, step_tabs)
         prev_button.click(lambda pid, idx: current_prompt(pid, max(0, int(idx)-1)), [project_select, prompt_position], [prompt_position, current_text, prompt_progress, active_prompt_id])
         next_button.click(lambda pid, idx: current_prompt(pid, int(idx)+1), [project_select, prompt_position], [prompt_position, current_text, prompt_progress, active_prompt_id])
         for button, decision in ((accept_button, "accept"), (review_button, "review"), (reject_button, "reject")):
-            button.click(lambda pid, idx, prompt_id, path, choice=decision: record_sample(pid, int(idx), prompt_id, path, choice), [project_select, prompt_position, active_prompt_id, recording], [record_result, sample_player, project_status, sample_table, prompt_position, queue_table])
-        rerecord_button.click(lambda: None, outputs=recording)
+            button.click(lambda pid, idx, prompt_id, path, choice=decision: record_sample(pid, int(idx), prompt_id, path, choice), [project_select, prompt_position, active_prompt_id, recording], [record_result, sample_player, project_status, sample_select, prompt_position, queue_table, recording])
         prompt_position.change(lambda pid, idx: current_prompt(pid, int(idx)) if pid else (0, "", "0 / 0", None), [project_select, prompt_position], [prompt_position, current_text, prompt_progress, active_prompt_id])
-        sample_filter.change(lambda pid, filt, query: _sample_rows(pid, filt, query) if pid else [], [project_select, sample_filter, sample_search], sample_table)
-        sample_search.change(lambda pid, filt, query: _sample_rows(pid, filt, query) if pid else [], [project_select, sample_filter, sample_search], sample_table)
-        load_sample_button.click(load_sample_audio, [project_select, sample_id], [sample_audio_player, sample_review_status])
+        sample_select.change(load_sample_audio, [project_select, sample_select], [sample_audio_player, sample_review_status])
         for button, status in ((accept_sample_button, "accepted"), (flag_sample_button, "review"), (reject_sample_button, "rejected")):
-            button.click(lambda pid, sid, value=status: review_sample(pid, sid, value), [project_select, sample_id], [sample_table, project_status, sample_review_status, queue_table])
+            button.click(lambda pid, sid, value=status: review_sample(pid, sid, value), [project_select, sample_select], [sample_select, project_status, sample_review_status, queue_table])
         duration_target.change(lambda target: gr.update(visible=(target == "Custom duration")), duration_target, custom_minutes_input)
-        create_dataset_button.click(make_dataset, [project_select, duration_target, custom_minutes_input], [dataset_select, train_dataset, dataset_status, project_status])
+        create_dataset_button.click(make_dataset, [project_select, duration_target, custom_minutes_input], [dataset_select, train_dataset, dataset_status, project_status]).then(step_availability, project_select, step_tabs)
         export_dataset_button.click(export_dataset_ui, [project_select, dataset_select], [dataset_archive, dataset_transfer_status])
-        import_dataset_button.click(import_dataset_ui, [project_select, dataset_import_file], [dataset_select, train_dataset, dataset_transfer_status])
-        download_checkpoint_button.click(download_base_checkpoint, base_select, [base_checkpoint_path, training_status])
+        import_dataset_button.click(import_dataset_ui, [project_select, dataset_import_file], [dataset_select, train_dataset, dataset_transfer_status]).then(step_availability, project_select, step_tabs)
+        download_checkpoint_button.click(lambda: download_base_checkpoint("pl_PL-darkman-medium"), outputs=[base_checkpoint_path, training_status])
         checkpoint_upload_button.click(save_uploaded_checkpoint, checkpoint_upload, [base_checkpoint_path, training_status])
-        training_mode.change(lambda mode: (gr.update(visible=(mode == "scratch")), gr.update(visible=(mode == "scratch")), gr.update(visible=(mode == "scratch"))), training_mode, [scratch_warning, warmstart_checkbox, warmstart_path])
-        warmstart_checkbox.change(lambda enabled: gr.update(visible=enabled), warmstart_checkbox, warmstart_path)
+        training_mode.change(lambda mode: (gr.update(visible=(mode == "finetune")), gr.update(visible=(mode == "scratch")), gr.update(visible=(mode == "scratch"), value=False), gr.update(visible=False, value="")), training_mode, [finetune_panel, scratch_warning, warmstart_checkbox, warmstart_path])
+        warmstart_checkbox.change(lambda enabled: gr.update(visible=True) if enabled else gr.update(visible=False, value=""), warmstart_checkbox, warmstart_path)
         prepare_button.click(prepare_training_summary, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [run_summary, training_status])
-        train_button.click(start_training, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [training_status, run_status])
+        for setting in (train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs):
+            setting.change(lambda: "", outputs=run_summary)
+        train_button.click(start_training, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, project_select, [run_status, run_select]).then(step_availability, project_select, step_tabs)
         cancel_button.click(cancel_training, project_select, [training_status, run_status])
-        refresh_run_button.click(lambda pid: (_run_status_text(pid), gr.update(choices=run_choices(pid))), project_select, [run_status, run_select])
-        refresh_run_button.click(lambda pid: gr.update(choices=run_choices(pid)), project_select, run_compare_select)
-        project_select.change(lambda pid: (gr.update(choices=run_choices(pid), value=None), gr.update(choices=run_choices(pid), value=None)), project_select, [run_select, run_compare_select])
-        inspect_run_button.click(inspect_run_config, [project_select, run_select], run_config_view)
-        compare_runs_button.click(compare_run_configs, [project_select, run_select, run_compare_select], run_comparison)
+        refresh_run_button.click(refresh_runs, project_select, [run_status, run_select]).then(step_availability, project_select, step_tabs)
         export_model_button.click(export_run, [project_select, run_select, model_name], [model_archive, model_status, model_select])
-        model_archive.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, model_select)
+        model_select.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, compare_model_select)
         synth_button.click(synthesize_model, [model_select, local_test_text], [synth_audio, model_status])
         compare_button.click(compare_models, [model_select, compare_model_select, local_test_text], [compare_audio_a, compare_audio_b, model_status])
         publish_button.click(publish_selected, model_select, publish_status)
-        project_select.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, compare_model_select)
-        dataset_select.change(lambda pid, dataset: gr.update(choices=evaluation_choices(pid, dataset)), [project_select, dataset_select], fixed_test_prompt)
+        dataset_select.change(lambda pid, dataset: (gr.update(choices=evaluation_choices(pid, dataset), value=None), gr.update(value=dataset)), [project_select, dataset_select], [fixed_test_prompt, train_dataset])
+        train_dataset.input(lambda dataset: gr.update(value=dataset), train_dataset, dataset_select)
         load_fixed_prompt_button.click(load_evaluation_prompt, [project_select, dataset_select, fixed_test_prompt], [local_test_text, reference_audio, model_status])
-        diagnostics_button.click(diagnostics, outputs=diagnostics_text)
-        api_test_button.click(lambda text, voice: (str(api_synthesize(text, voice, DATA_DIR / "exports" / f"api-{uuid.uuid4().hex}.wav")), "API request completed."), [api_text, api_voice], [api_audio, api_status])
-        demo.load(load_app_state, project_select, [project_select, project_status, queue_table, dataset_select, sample_table, queue_action_status, train_dataset, prompt_position, current_text, prompt_progress, active_prompt_id])
+        demo.load(load_app_state, project_select, [project_select, *project_state_outputs]).then(reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status]).then(step_availability, project_select, step_tabs)
     return demo
 
 
+def launch_app():
+    return build_app().launch(
+        server_name="0.0.0.0", server_port=int(os.environ.get("PORT", "7860")),
+        show_error=True, max_file_size="2gb",
+        allowed_paths=[str((DATA_DIR / "projects").resolve()), str((DATA_DIR / "exports").resolve())],
+    )
+
+
 if __name__ == "__main__":
-    build_app().launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", "7860")), show_error=True, max_file_size="2gb")
+    launch_app()

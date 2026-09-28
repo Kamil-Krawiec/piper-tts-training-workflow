@@ -16,13 +16,14 @@ The container defaults to host UID/GID `1000:1000` so files in `./data` remain e
 
 ## Main workflow
 
-1. Create a project, or choose the existing project after a restart.
-2. Paste Polish prose, upload a `.txt` file, or choose the built-in demo pack. Select **Prose / auto split** or **One prompt per line**, set an assumed words-per-minute rate, and preview the estimated duration.
-3. Edit the prompt queue before recording. Queue edits keep stable prompt IDs. Existing recordings retain their original text snapshot if a prompt is changed later.
-4. Record one prompt at a time in the browser. Play it back, accept it, save it for review, or reject it. Accepted samples are normalized to mono 22,050 Hz PCM WAV without denoising or compression. Warnings remain reviewable.
-5. Create a 15-minute, 30-minute, 60-minute, custom-duration, or all-accepted dataset. A fixed seed chooses the samples; held-out validation and test recordings stay the same across target sizes. `metadata.csv` documents all samples, while Piper trains from `train_metadata.csv`, which excludes those held-out recordings.
-6. Export a dataset ZIP and import that ZIP in the same UI on a GPU host. The Train tab shows the fixed split summary, then lets you select fine-tuning or full training explicitly before starting the run.
-7. Export a finished run to an ONNX plus JSON pair, synthesize a local test, and optionally publish the pair to the included Piper OpenAI-compatible server.
+1. **Project:** Choose a saved project by name or create one. The app creates its ID for you.
+2. **Text:** Paste prose, upload a `.txt` file, or load a built-in prompt pack. Preview the prompts and estimated duration. You can edit prompt text before recording; existing takes retain their original text snapshot.
+3. **Record:** Read one displayed prompt, record it with the microphone, listen, and accept it or save it for review. Accepted samples are normalized to mono 22,050 Hz PCM WAV without denoising or compression. Choose a saved recording to listen or change its status.
+4. **Dataset:** Build a 15-minute, 30-minute, 60-minute, custom-duration, or all-accepted dataset, or import a dataset ZIP. Export a ZIP here to move to a GPU host. Fixed validation and test recordings stay the same across target sizes. Piper trains from `train_metadata.csv`, which excludes those held-out recordings.
+5. **Train:** Choose fine-tuning or full training, supply a checkpoint if fine-tuning, choose your device, review the run summary, and start. Refresh the saved status and logs to follow progress.
+6. **Voice:** Export a saved checkpoint as an ONNX plus JSON pair, download the voice ZIP, and generate a local listening test. Listening comparisons and publishing to the optional Piper API are available in expandable sections.
+
+Each step reads from top to bottom and ends with Back/Continue navigation. Later steps unlock when their prerequisites are saved. **Resume saved progress** in Step 1 jumps to the next stage for an existing project. **Import a dataset ZIP** goes directly to Step 4 for the two-machine workflow. Switching projects clears temporary outputs from the previous workspace.
 
 ## NVIDIA GPU workflow
 
@@ -89,7 +90,7 @@ Back up this directory to retain projects, recordings, bundles, logs, checkpoint
 
 Sentence splitting is deterministic and handles common Polish abbreviations and decimal/version numbers without paraphrasing. Line mode makes every non-empty line one prompt. The prompt text is the dataset label; no ASR is used. Prompt length and audio quality checks are recommendations for review, not automatic deletion rules.
 
-The recording UI estimates duration from word count and the selected speaking rate. It is not a promise about accepted dataset duration. Dataset target selection uses actual normalized audio lengths.
+The recording UI estimates duration from word count at 140 words per minute. It is not a promise about accepted dataset duration. Dataset target selection uses actual normalized audio lengths.
 
 ## Limitations
 
@@ -115,7 +116,11 @@ docker compose -f compose.yml -f compose.gpu.yml config
 docker compose --profile inference config
 ```
 
-The app's Diagnostics tab reports ffmpeg, eSpeak NG, Piper training, CUDA, and optional API availability.
+UI callback tests also run when Gradio is installed (they are skipped by the core-only command). Use the app's Python environment to include them:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Licensing
 

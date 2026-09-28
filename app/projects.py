@@ -64,6 +64,14 @@ class ProjectStore:
         db.execute("PRAGMA foreign_keys = ON")
         return db
 
+    def has_project(self, project_id: str | None) -> bool:
+        try:
+            project_id = _safe_id(project_id)
+        except (TypeError, ValueError):
+            return False
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone() is not None
+
     def create_project(self, name: str, language: str = "pl_PL", espeak_voice: str = "pl") -> dict[str, Any]:
         name = name.strip()
         if not name or len(name) > 80:

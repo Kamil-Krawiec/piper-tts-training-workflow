@@ -105,7 +105,7 @@ def validate_training_config(config: dict[str, Any], cuda_available: bool | None
         errors.append("Select an eSpeak voice.")
     if config.get("training_mode") not in {"finetune", "scratch"}:
         errors.append("Select a training mode.")
-    if config.get("training_mode") == "finetune" and not Path(config.get("checkpoint", "")).is_file():
+    if config.get("training_mode") == "finetune" and not Path(config.get("checkpoint") or "").is_file():
         errors.append("Fine-tuning requires an existing checkpoint file.")
     if config.get("vocoder_warmstart_checkpoint") and not Path(config["vocoder_warmstart_checkpoint"]).is_file():
         errors.append("The vocoder warm-start checkpoint file does not exist.")
