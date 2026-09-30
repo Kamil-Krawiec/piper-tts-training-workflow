@@ -118,3 +118,26 @@ class GuidedUITests(unittest.TestCase):
                     str(Path(self.temp.name) / "exports"),
                 ])
         asyncio.run(launch())
+
+    def test_training_start_uses_the_run_id_used_in_saved_config_paths(self):
+        project = self.store.create_project("Narrator")
+        dataset = self.store.project_dir(project["id"]) / "datasets" / "saved"
+        dataset.mkdir(parents=True)
+        with patch.object(self.ui, "validate_training_config", return_value=[]), patch.object(self.ui.JOBS, "start", return_value="run-1") as start, patch.object(self.ui, "_run_status_text", return_value="status"):
+            self.ui.start_training(project["id"], "saved", "scratch", "", "", "cpu", 4, 42, 10)
+        config = start.call_args.args[1]
+        self.assertEqual(start.call_args.kwargs["run_id"], Path(config["run_dir"]).name)
+
+    def test_training_view_shows_saved_epoch_progress_and_loss_plot(self):
+        project = self.store.create_project("Narrator")
+        state = {"run_id": "run-1234", "status": "training", "log_tail": "latest log", "progress": {
+            "current_epoch": 3, "completed_epochs": 2, "max_epochs": 10,
+            "losses": [{"epoch": 1, "loss": 3.0, "series": "Training"}, {"epoch": 2, "loss": 2.5, "series": "Validation"}],
+        }}
+        with patch.object(self.ui.JOBS, "status", return_value=state):
+            summary, chart, logs = self.ui.training_view(project["id"])
+        self.assertIn("Epoch 3 of 10", summary)
+        self.assertIn("20%", summary)
+        self.assertTrue(chart["visible"])
+        self.assertEqual(len(chart["value"]), 2)
+        self.assertIn("latest log", logs)

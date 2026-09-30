@@ -30,9 +30,12 @@ class WorkflowProgressTests(unittest.TestCase):
             self.assertIsNone(progress.blocked_reason(6))
             self.assertEqual(progress.next_step, 6)
 
+    def test_resume_returns_to_train_while_a_run_is_active(self):
+        progress = WorkflowProgress(project=True, datasets=1, runs=1, training=True)
+        self.assertEqual(progress.next_step, 5)
+
     def test_next_step_uses_actual_saved_progress(self):
         self.assertEqual(WorkflowProgress().next_step, 1)
         self.assertEqual(WorkflowProgress(project=True).next_step, 2)
         self.assertEqual(WorkflowProgress(project=True, prompts=2).next_step, 3)
         self.assertEqual(WorkflowProgress(project=True, prompts=2, accepted=1).next_step, 4)
-

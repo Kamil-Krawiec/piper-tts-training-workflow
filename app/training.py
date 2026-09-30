@@ -31,6 +31,11 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
     mode = config.get("training_mode")
     if mode not in {"finetune", "scratch"}:
         raise ValueError("training_mode must be 'finetune' or 'scratch'")
+    run_dir = Path(config.get("run_dir", Path(config["config_path"]).parent))
+    csv_logger = {
+        "class_path": "lightning.pytorch.loggers.CSVLogger",
+        "init_args": {"save_dir": str(run_dir), "name": "metrics", "version": 0, "flush_logs_every_n_steps": 1},
+    }
     command = [
         sys.executable, "-m", "piper.train", "fit",
         "--data.voice_name", str(config["voice_name"]),
@@ -46,7 +51,10 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         "--trainer.accelerator", "gpu" if config["device"] == "cuda" else "cpu",
         "--trainer.devices", "1",
         "--trainer.max_epochs", str(int(config.get("max_epochs", 1000))),
-        "--trainer.default_root_dir", str(config.get("run_dir", Path(config["config_path"]).parent)),
+        "--trainer.default_root_dir", str(run_dir),
+        "--trainer.logger", json.dumps(csv_logger),
+        "--trainer.log_every_n_steps", "10",
+        "--trainer.enable_progress_bar", "false",
         "--seed_everything", str(int(config.get("seed", 42))),
     ]
     if config["device"] not in {"cpu", "cuda"}:
@@ -147,12 +155,12 @@ class TrainingJobs:
             raise ValueError("invalid project or run id")
         return self.data_dir / "projects" / project_id / "runs" / run_id
 
-    def start(self, project_id: str, config: dict[str, Any]) -> str:
+    def start(self, project_id: str, config: dict[str, Any], run_id: str | None = None) -> str:
         with self._lock:
             current = self.status(project_id)
             if current and current["status"] in {"preparing", "training", "queued"}:
                 raise RuntimeError("a training job is already active for this project")
-            run_id = str(uuid.uuid4())
+            run_id = run_id or str(uuid.uuid4())
             run_dir = self._run_dir(project_id, run_id)
             run_dir.mkdir(parents=True, exist_ok=False)
             command = build_training_command({**config, "run_dir": run_dir})
@@ -189,6 +197,7 @@ class TrainingJobs:
                 state["run_id"] = run_dir.name
                 state["log_tail"] = _tail(run_dir / "train.log")
                 state["config"] = json.loads((run_dir / "run-config.json").read_text(encoding="utf-8"))
+                state["progress"] = _training_progress(run_dir, state["config"])
                 return state
         return None
 
@@ -209,7 +218,9 @@ def _process_exists(pid: int) -> bool:
     try:
         os.kill(int(pid), 0)
         return True
-    except (ProcessLookupError, PermissionError, ValueError):
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError):
         return False
 
 
@@ -221,3 +232,28 @@ def _tail(path: Path, lines: int = 60) -> str:
         stream.seek(max(0, stream.tell() - 128 * 1024))
         content = stream.read().decode("utf-8", "replace")
     return "\n".join(content.splitlines()[-lines:])
+
+
+def _training_progress(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Read the trainer's durable CSV metrics; an incomplete last row is ignored."""
+    maximum = int(config.get("max_epochs", 0))
+    result: dict[str, Any] = {"max_epochs": maximum, "current_epoch": 0, "completed_epochs": 0, "losses": []}
+    path = run_dir / "metrics" / "version_0" / "metrics.csv"
+    if not path.is_file():
+        return result
+    try:
+        with path.open(encoding="utf-8", newline="") as stream:
+            for row in csv.DictReader(stream):
+                if not row.get("epoch"):
+                    continue
+                epoch = int(float(row["epoch"])) + 1
+                result["current_epoch"] = max(result["current_epoch"], epoch)
+                for key, label in (("loss_g", "Training"), ("val_loss", "Validation")):
+                    if row.get(key):
+                        if key == "val_loss":
+                            result["completed_epochs"] = max(result["completed_epochs"], epoch)
+                        result["losses"].append({"epoch": epoch, "loss": float(row[key]), "series": label})
+    except (OSError, UnicodeError, ValueError, csv.Error):
+        return result
+    result["losses"] = result["losses"][-300:]
+    return result

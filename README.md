@@ -20,7 +20,7 @@ The container defaults to host UID/GID `1000:1000` so files in `./data` remain e
 2. **Text:** Paste prose, upload a `.txt` file, or load a built-in prompt pack. Preview the prompts and estimated duration. You can edit prompt text before recording; existing takes retain their original text snapshot.
 3. **Record:** Read one displayed prompt, record it with the microphone, listen, and accept it or save it for review. Accepted samples are normalized to mono 22,050 Hz PCM WAV without denoising or compression. Choose a saved recording to listen or change its status.
 4. **Dataset:** Build a 15-minute, 30-minute, 60-minute, custom-duration, or all-accepted dataset, or import a dataset ZIP. Export a ZIP here to move to a GPU host. Fixed validation and test recordings stay the same across target sizes. Piper trains from `train_metadata.csv`, which excludes those held-out recordings.
-5. **Train:** Choose fine-tuning or full training, supply a checkpoint if fine-tuning, choose your device, review the run summary, and start. Refresh the saved status and logs to follow progress.
+5. **Train:** Choose fine-tuning or full training, supply a checkpoint if fine-tuning, choose your device, review the run summary, and start. The saved epoch bar and loss chart refresh while the page is open. Recent logs remain available under the chart.
 6. **Voice:** Export a saved checkpoint as an ONNX plus JSON pair, download the voice ZIP, and generate a local listening test. Listening comparisons and publishing to the optional Piper API are available in expandable sections.
 
 Each step reads from top to bottom and ends with Back/Continue navigation. Later steps unlock when their prerequisites are saved. **Resume saved progress** in Step 1 jumps to the next stage for an existing project. **Import a dataset ZIP** goes directly to Step 4 for the two-machine workflow. Switching projects clears temporary outputs from the previous workspace.
@@ -42,7 +42,7 @@ To move the recording project to the GPU host, copy the exported dataset ZIP and
 - **Fine-tune existing Piper checkpoint** is the default and requires a `.ckpt` path. The curated Polish medium checkpoint is `pl_PL-darkman-medium`, cached from a pinned Piper checkpoint dataset revision.
 - **Full training from scratch** omits `--ckpt_path`. It can optionally use `--model.vocoder_warmstart_ckpt`; that warm-start is recorded separately from the training mode. Small datasets display an informational warning but are not blocked.
 
-Every run stores `run-config.json`, the actual command, status, and `train.log` in the project's persistent run directory. The command uses Piper `v1.3.0`, PyTorch `2.6.0`, and pinned training dependency constraints with Python Lightning CPU/GPU accelerator selection. Runs do not send recordings or model files to a remote service.
+Every run stores `run-config.json`, the actual command, status, `train.log`, and CSV loss metrics in the project's persistent run directory. Training runs as a separate process, so closing the browser or losing its connection does not stop it. Reopen the project to see saved progress. Stopping the trainer container interrupts the process. The command uses Piper `v1.3.0`, PyTorch `2.6.0`, and pinned training dependency constraints with Python Lightning CPU/GPU accelerator selection. Runs do not send recordings or model files to a remote service.
 
 ## Optional OpenAI-compatible Piper API
 

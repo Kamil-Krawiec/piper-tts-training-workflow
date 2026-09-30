@@ -11,6 +11,7 @@ class WorkflowProgress:
     datasets: int = 0
     runs: int = 0
     models: int = 0
+    training: bool = False
 
     def blocked_reason(self, step: int) -> str | None:
         if step not in range(1, 7):
@@ -31,6 +32,8 @@ class WorkflowProgress:
     def next_step(self) -> int:
         if not self.project:
             return 1
+        if self.training:
+            return 5
         if self.runs or self.models:
             return 6
         if self.datasets:

@@ -49,6 +49,13 @@ body { background: #f5f7fa !important; }
 #workflow-message p { color: #87501c; background: #fff6e9; border: 1px solid #eddbbd; border-radius: 10px; padding: 12px 16px; margin: 0; }
 .gradio-container .prose { line-height: 1.65; }
 .gradio-container .prose h3 { margin-top: 12px; color: #233f45; }
+.train-summary { border: 1px solid #c4d5d1; border-radius: 10px; background: #f5faf8; padding: 16px 18px; color: #203c37; }
+.train-summary-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.train-summary-head strong { font-size: 1.05rem; }
+.train-summary-head span { color: #536b65; font-size: .85rem; }
+.train-summary p { margin: 8px 0 12px; font-size: .92rem; }
+.train-progress { height: 10px; border-radius: 999px; background: #d9e7e2; overflow: hidden; }
+.train-progress span { display: block; height: 100%; border-radius: inherit; background: #176c60; transition: width .3s ease; }
 body.dark .gradio-container .contain { background: #111827 !important; color: #f1f5f9 !important; color-scheme: dark; }
 body.dark .gradio-container .contain [data-testid="block-info"], body.dark .gradio-container .contain h3 { color: #f1f5f9 !important; background: transparent !important; }
 body.dark .gradio-container .contain p, body.dark .gradio-container .contain .prose { color: #cbd5e1 !important; }
@@ -66,6 +73,8 @@ body.dark .gradio-container .contain #workflow [role="tablist"] button:disabled 
 body.dark .gradio-container .contain .step-footer { border-top-color: #526273 !important; }
 body.dark .gradio-container .contain #recording-prompt { background: #183b36 !important; border-color: #4b9484 !important; }
 body.dark .gradio-container .contain #recording-prompt p { color: #f0fdf9 !important; }
+body.dark .gradio-container .contain .train-summary { background: #183b36; border-color: #4b9484; color: #f0fdf9; }
+body.dark .gradio-container .contain .train-summary-head span { color: #cbd5e1; }
 body.dark .gradio-container .contain #prompt-queue table th, body.dark .gradio-container .contain #prompt-queue table td { background: #1f2937 !important; color: #f1f5f9 !important; border-color: #526273 !important; }
 body.dark .gradio-container .contain #prompt-queue table tbody tr:nth-child(even) td { background: #273548 !important; }
 @media (max-width: 640px) {

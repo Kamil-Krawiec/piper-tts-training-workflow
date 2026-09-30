@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import gradio as gr
+import pandas as pd
 
 from app.audio import inspect_wav, normalize_audio
 from app.bundles import export_bundle, import_bundle
@@ -466,7 +467,7 @@ def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_pat
         errors = validate_training_config(config, cuda_available=has_cuda)
         if errors:
             raise ValueError("\n".join(errors))
-        actual_run_id = JOBS.start(project_id, config)
+        actual_run_id = JOBS.start(project_id, config, run_id=run_id)
         return f"Started {mode} run {actual_run_id} on {selected_device}.", _run_status_text(project_id)
     except Exception as error:
         return f"Training not started: {error}", _run_status_text(project_id) if project_id else ""
@@ -490,6 +491,35 @@ def _run_status_text(project_id: str):
     if not status:
         return "No training runs yet."
     return f"Run: {status['run_id']} · Status: {status['status']}\n{status.get('log_tail','')}"
+
+
+def training_view(project_id: str | None):
+    """Return a concise saved summary, optional loss history, and diagnostic logs."""
+    if not STORE.has_project(project_id):
+        return "Select a project to see training progress.", gr.update(value=None, visible=False), "No training runs yet."
+    state = JOBS.status(project_id)
+    if not state:
+        return "No training runs yet.", gr.update(value=None, visible=False), "No training runs yet."
+    from html import escape
+    progress = state["progress"]
+    maximum = progress["max_epochs"]
+    completed = min(progress["completed_epochs"], maximum) if maximum else 0
+    percentage = round(100 * completed / maximum) if maximum else 0
+    current = progress["current_epoch"]
+    phase = escape(state["status"].replace("_", " ").title())
+    epoch_label = f"Epoch {current} of {maximum}" if current else "Waiting for first epoch"
+    run_label = escape(state["run_id"][:8])
+    summary = (
+        f'<div class="train-summary"><div class="train-summary-head"><strong>{phase}</strong>'
+        f'<span>Run {run_label}</span></div><p>{epoch_label} · {percentage}% of epochs completed</p>'
+        f'<div class="train-progress" role="progressbar" aria-label="Completed training epochs" '
+        f'aria-valuenow="{completed}" aria-valuemin="0" aria-valuemax="{maximum or 1}">'
+        f'<span style="width:{percentage}%"></span></div></div>'
+    )
+    losses = progress["losses"]
+    chart = gr.update(value=pd.DataFrame(losses) if losses else None, visible=bool(losses))
+    logs = f"Run: {state['run_id']} · Status: {state['status']}\n{state.get('log_tail', '')}"
+    return summary, chart, logs
 
 
 def cancel_training(project_id: str):
@@ -626,11 +656,13 @@ def workflow_progress(project_id: str | None) -> WorkflowProgress:
     if not STORE.has_project(project_id):
         return WorkflowProgress()
     project = STORE.get_project(project_id)
+    run = JOBS.status(project_id)
     return WorkflowProgress(
         project=True, prompts=len(project["prompts"]),
         accepted=project["sample_counts"].get("accepted", {}).get("count", 0),
         datasets=len(_dataset_dirs(project_id)), runs=len(run_choices(project_id)),
         models=len(model_choices(project_id)),
+        training=bool(run and run["status"] in {"preparing", "queued", "training"}),
     )
 
 
@@ -659,9 +691,12 @@ def reset_project_view(project_id: str | None):
 
 def refresh_runs(project_id: str | None):
     choices = run_choices(project_id)
+    summary, chart, logs = training_view(project_id)
     return (
-        _run_status_text(project_id),
+        logs,
         gr.update(choices=choices, value=choices[0][1] if choices else None),
+        summary,
+        chart,
     )
 
 
@@ -807,9 +842,12 @@ def build_app() -> gr.Blocks:
                 run_summary = gr.Markdown()
                 train_button = gr.Button("Start training", variant="primary")
                 training_status = gr.Markdown()
-                with gr.Accordion("Training progress and controls", open=False) as training_progress_panel:
-                    gr.Markdown("Refresh to see the saved status and latest logs. You can export after the run saves a checkpoint.")
-                    run_status = gr.Code(label="Training status and recent logs", language="shell", value="No training runs yet.")
+                with gr.Accordion("Training progress and controls", open=True) as training_progress_panel:
+                    gr.Markdown("Training continues when you close this page. Return to this project to see its saved progress.")
+                    run_progress = gr.HTML("No training runs yet.")
+                    run_chart = gr.LinePlot(x="epoch", y="loss", color="series", y_aggregate="mean", title="Loss over epochs", x_title="Epoch", y_title="Loss", height=260, visible=False)
+                    with gr.Accordion("Recent trainer logs", open=False):
+                        run_status = gr.Code(label="Latest log lines", language="shell", value="No training runs yet.")
                     with gr.Row():
                         refresh_run_button = gr.Button("Refresh training status")
                         cancel_button = gr.Button("Stop training", variant="stop")
@@ -863,7 +901,7 @@ def build_app() -> gr.Blocks:
             reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status],
         ).then(
             lambda: ("",) * len(stale_text) + (None,) * len(stale_files), outputs=stale_text + stale_files,
-        ).then(step_availability, project_select, step_tabs).then(lambda: gr.update(selected=1), outputs=workflow_tabs)
+        ).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs).then(lambda: gr.update(selected=1), outputs=workflow_tabs)
         scroll_to_step = "() => { document.getElementById('workflow').scrollIntoView({behavior: 'smooth', block: 'start'}); }"
         for button, current, target in forward_buttons:
             button.click(lambda pid, source=current, destination=target: navigate_step(pid, source, destination), project_select, [workflow_tabs, workflow_status]).then(fn=None, js=scroll_to_step)
@@ -894,9 +932,10 @@ def build_app() -> gr.Blocks:
         prepare_button.click(prepare_training_summary, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [run_summary, training_status])
         for setting in (train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs):
             setting.change(lambda: "", outputs=run_summary)
-        train_button.click(start_training, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, project_select, [run_status, run_select]).then(step_availability, project_select, step_tabs)
-        cancel_button.click(cancel_training, project_select, [training_status, run_status])
-        refresh_run_button.click(refresh_runs, project_select, [run_status, run_select]).then(step_availability, project_select, step_tabs)
+        train_button.click(start_training, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
+        cancel_button.click(cancel_training, project_select, [training_status, run_status]).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart])
+        refresh_run_button.click(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
+        gr.Timer(10).tick(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart])
         export_model_button.click(export_run, [project_select, run_select, model_name], [model_archive, model_status, model_select])
         model_select.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, compare_model_select)
         synth_button.click(synthesize_model, [model_select, local_test_text], [synth_audio, model_status])
@@ -905,7 +944,7 @@ def build_app() -> gr.Blocks:
         dataset_select.change(lambda pid, dataset: (gr.update(choices=evaluation_choices(pid, dataset), value=None), gr.update(value=dataset)), [project_select, dataset_select], [fixed_test_prompt, train_dataset])
         train_dataset.input(lambda dataset: gr.update(value=dataset), train_dataset, dataset_select)
         load_fixed_prompt_button.click(load_evaluation_prompt, [project_select, dataset_select, fixed_test_prompt], [local_test_text, reference_audio, model_status])
-        demo.load(load_app_state, project_select, [project_select, *project_state_outputs]).then(reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status]).then(step_availability, project_select, step_tabs)
+        demo.load(load_app_state, project_select, [project_select, *project_state_outputs]).then(reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status]).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
     return demo
 
 

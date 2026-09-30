@@ -91,6 +91,8 @@ class TrainingCommandTests(unittest.TestCase):
         self.assertIn("--model.vocoder_warmstart_ckpt", scratch)
         self.assertIn("--trainer.accelerator", finetune)
         self.assertIn("--trainer.max_epochs", finetune)
+        self.assertIn("--trainer.logger", finetune)
+        self.assertIn("lightning.pytorch.loggers.CSVLogger", " ".join(finetune))
 
     def test_explicit_cuda_is_invalid_when_container_has_no_cuda(self):
         config = {
