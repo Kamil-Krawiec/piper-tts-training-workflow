@@ -25,8 +25,8 @@ def normalize_audio(source: Path, destination: Path, sample_rate: int = 22050) -
     return target
 
 
-def trim_leading_silence(source: Path, destination: Path, sample_rate: int = 22050) -> Path:
-    """Create a trimmed copy while retaining 250 ms before the first speech."""
+def trim_edge_silence(source: Path, destination: Path, sample_rate: int = 22050) -> Path:
+    """Create a trimmed copy retaining 250 ms of silence at each speech edge."""
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg is required to prepare training audio")
     target = Path(destination)
@@ -34,7 +34,8 @@ def trim_leading_silence(source: Path, destination: Path, sample_rate: int = 220
     process = subprocess.run(
         [
             "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source),
-            "-af", "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.25",
+            "-af",
+            "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.25,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.25,areverse",
             "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(target),
         ],
         capture_output=True, text=True, check=False,

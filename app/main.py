@@ -15,7 +15,7 @@ from typing import Any
 import gradio as gr
 import pandas as pd
 
-from app.audio import inspect_wav, normalize_audio, trim_leading_silence
+from app.audio import inspect_wav, normalize_audio, trim_edge_silence
 from app.bundles import export_bundle, import_bundle
 from app.checkpoints import download_checkpoint
 from app.datasets import create_dataset
@@ -383,7 +383,7 @@ def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
                     continue
                 source = Path(sample["audio_file"])
                 trimmed = Path(staging) / f"{sample['id']}.wav"
-                trim_leading_silence(source, trimmed)
+                trim_edge_silence(source, trimmed)
                 prepared_samples.append({
                     **sample,
                     "audio_file": str(trimmed),
@@ -396,7 +396,7 @@ def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
         (output / "project-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
         choices = _dataset_choices(project_id)
         count = manifest["sample_count"]
-        status = f"Created {count} sample{'s' if count != 1 else ''} ({_duration_label(manifest['total_seconds'])}), seed 42. Leading silence was trimmed in the training copies; original recordings are unchanged."
+        status = f"Created {count} sample{'s' if count != 1 else ''} ({_duration_label(manifest['total_seconds'])}), seed 42. Leading and trailing silence were trimmed in the training copies; original recordings are unchanged."
         return gr.update(choices=choices, value=dataset_id), gr.update(choices=choices, value=dataset_id), status, _project_summary(project_id)
     except Exception as error:
         return gr.update(), gr.update(), f"Dataset creation failed: {error}", _project_summary(project_id)

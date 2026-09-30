@@ -2,6 +2,7 @@
 
 from pathlib import PosixPath
 import inspect
+import logging
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ def main() -> None:
 
     base_cli = piper_cli.VitsLightningCLI
     model_parameters = inspect.signature(piper_cli.VitsModel.__init__).parameters
+    logger = logging.getLogger(__name__)
 
     class CheckpointCompatibleCLI(base_cli):
         def _parse_ckpt_path(self) -> None:
@@ -30,6 +32,10 @@ def main() -> None:
             checkpoint = torch.load(ckpt_path, weights_only=True, map_location="cpu")
             hparams = checkpoint.get("hyper_parameters", {})
             hparams.pop("_instantiator", None)
+            state_dict = checkpoint.get("state_dict")
+            if not isinstance(state_dict, dict):
+                raise ValueError("Fine-tuning checkpoint is missing its model state dictionary")
+            self._initial_state_dict = state_dict
             hparams = {
                 name: value
                 for name, value in hparams.items()
@@ -48,6 +54,17 @@ def main() -> None:
             except SystemExit:
                 sys.stderr.write("Parsing of ckpt_path hyperparameters failed!\n")
                 raise
+
+        def before_fit(self) -> None:
+            """Initialize from checkpoint weights without resuming its old training epoch."""
+            fit_config = self.config[self.subcommand]
+            if not fit_config.get("ckpt_path"):
+                return
+            self.model.load_state_dict(self._initial_state_dict)
+            del self._initial_state_dict
+            # LightningCLI builds Trainer.fit kwargs from config_init after this hook.
+            self.config_init[self.subcommand]["ckpt_path"] = None
+            logger.info("Loaded fine-tuning weights; starting a new training run at epoch 0.")
 
     piper_cli.VitsLightningCLI = CheckpointCompatibleCLI
 
