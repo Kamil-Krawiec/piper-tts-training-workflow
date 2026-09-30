@@ -23,7 +23,9 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 RUN git clone https://github.com/OHF-Voice/piper1-gpl.git /opt/piper1-gpl \
     && cd /opt/piper1-gpl \
     && git checkout "${PIPER_REVISION}" \
-    && python -m pip install --no-cache-dir --constraint /app/piper-constraints.txt '.[train]' \
+    && python -m pip install --no-cache-dir --constraint /app/piper-constraints.txt -e '.[train]' \
+    && python -m pip install --no-cache-dir 'scikit-build<1' 'cmake>=3.26,<4' \
+    && python setup.py build_ext --inplace \
     && ./build_monotonic_align.sh
 
 COPY app /app/app
