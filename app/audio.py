@@ -25,6 +25,33 @@ def normalize_audio(source: Path, destination: Path, sample_rate: int = 22050) -
     return target
 
 
+def trim_leading_silence(source: Path, destination: Path, sample_rate: int = 22050) -> Path:
+    """Create a trimmed copy while retaining 250 ms before the first speech."""
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg is required to prepare training audio")
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    process = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source),
+            "-af", "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.25",
+            "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(target),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if process.returncode:
+        target.unlink(missing_ok=True)
+        raise RuntimeError(f"Silence trimming failed: {process.stderr.strip()[-800:]}")
+    try:
+        with wave.open(str(target), "rb") as audio:
+            has_audio = audio.getnframes() > 0
+    except (OSError, wave.Error):
+        has_audio = False
+    if not has_audio:
+        shutil.copy2(source, target)
+    return target
+
+
 def inspect_wav(path: Path) -> dict[str, Any]:
     with wave.open(str(path), "rb") as audio:
         channels = audio.getnchannels()

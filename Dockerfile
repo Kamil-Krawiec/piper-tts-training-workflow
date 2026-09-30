@@ -23,7 +23,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 RUN git clone https://github.com/OHF-Voice/piper1-gpl.git /opt/piper1-gpl \
     && cd /opt/piper1-gpl \
     && git checkout "${PIPER_REVISION}" \
-    && python -m pip install --no-cache-dir --constraint /app/piper-constraints.txt -e '.[train]' \
+    && python -m pip install --no-cache-dir --constraint /app/piper-constraints.txt '.[train]' \
     && ./build_monotonic_align.sh
 
 COPY app /app/app

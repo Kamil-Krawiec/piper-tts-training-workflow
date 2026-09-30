@@ -37,7 +37,7 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         "init_args": {"save_dir": str(run_dir), "name": "metrics", "version": 0, "flush_logs_every_n_steps": 1},
     }
     command = [
-        sys.executable, "-m", "piper.train", "fit",
+        sys.executable, str(Path(__file__).with_name("train_cli.py")), "fit",
         "--data.voice_name", str(config["voice_name"]),
         "--data.csv_path", str(config["csv_path"]),
         "--data.audio_dir", str(config["audio_dir"]),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 import uuid
 from datetime import datetime
@@ -14,7 +15,7 @@ from typing import Any
 import gradio as gr
 import pandas as pd
 
-from app.audio import inspect_wav, normalize_audio
+from app.audio import inspect_wav, normalize_audio, trim_leading_silence
 from app.bundles import export_bundle, import_bundle
 from app.checkpoints import download_checkpoint
 from app.datasets import create_dataset
@@ -372,14 +373,30 @@ def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
             raise ValueError("Accept at least one normalized recording before creating a dataset.")
         dataset_id = f"dataset-{target.replace(' ', '').replace('minutes','m')}-{uuid.uuid4().hex[:8]}"
         output = STORE.project_dir(project_id) / "datasets" / dataset_id
-        manifest = create_dataset(sample_rows, output, target_seconds, seed=42)
+        staging_root = DATA_DIR / "tmp"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="dataset-audio-", dir=staging_root) as staging:
+            prepared_samples = []
+            for sample in sample_rows:
+                if sample["status"] != "accepted" or not sample.get("audio_file"):
+                    prepared_samples.append(sample)
+                    continue
+                source = Path(sample["audio_file"])
+                trimmed = Path(staging) / f"{sample['id']}.wav"
+                trim_leading_silence(source, trimmed)
+                prepared_samples.append({
+                    **sample,
+                    "audio_file": str(trimmed),
+                    "duration_seconds": inspect_wav(trimmed)["duration_seconds"],
+                })
+            manifest = create_dataset(prepared_samples, output, target_seconds, seed=42)
         project = STORE.get_project(project_id)
         info = {key: project[key] for key in ("name", "language", "espeak_voice")}
         info.update({"sample_rate": 22050, "dataset_id": dataset_id})
         (output / "project-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
         choices = _dataset_choices(project_id)
         count = manifest["sample_count"]
-        status = f"Created {count} sample{'s' if count != 1 else ''} ({_duration_label(manifest['total_seconds'])}), seed 42."
+        status = f"Created {count} sample{'s' if count != 1 else ''} ({_duration_label(manifest['total_seconds'])}), seed 42. Leading silence was trimmed in the training copies; original recordings are unchanged."
         return gr.update(choices=choices, value=dataset_id), gr.update(choices=choices, value=dataset_id), status, _project_summary(project_id)
     except Exception as error:
         return gr.update(), gr.update(), f"Dataset creation failed: {error}", _project_summary(project_id)
