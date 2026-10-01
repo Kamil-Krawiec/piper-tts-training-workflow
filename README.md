@@ -25,6 +25,30 @@ The container defaults to host UID/GID `1000:1000` so files in `./data` remain e
 
 Each step reads from top to bottom and ends with Back/Continue navigation. Later steps unlock when their prerequisites are saved. **Resume saved progress** in Step 1 jumps to the next stage for an existing project. **Import a dataset ZIP** goes directly to Step 4 for the two-machine workflow. Switching projects clears temporary outputs from the previous workspace.
 
+## Docker Hub images
+
+The publishing workflow builds Linux x86-64 (`linux/amd64`) images for the existing public repository `kamilkrawiec/piper-tts-training-workflow`:
+
+After the first successful publish:
+
+```bash
+docker pull kamilkrawiec/piper-tts-training-workflow:cpu
+docker pull kamilkrawiec/piper-tts-training-workflow:cuda
+```
+
+The CUDA image requires an NVIDIA-compatible host and container runtime for GPU training. Use the CUDA image for RunPod; pin a release such as `v0.1.0-cuda` after that release is published. Both variants use the same Dockerfile and application code. Local Compose commands keep their existing `build:` support and do not require prebuilt Docker Hub images.
+
+### Publishing images (maintainers)
+
+In GitHub repository **Settings → Secrets and variables → Actions → New repository secret**, add:
+
+- `DOCKERHUB_USERNAME`: the Docker Hub account with push access to `kamilkrawiec/piper-tts-training-workflow`.
+- `DOCKERHUB_TOKEN`: a Docker Hub access token with write permission, not the account password.
+
+After the workflow is on the default branch, open **Actions → Publish Docker images → Run workflow** to publish the moving `cpu` and `cuda` tags. Pushing a version tag such as `v0.1.0` also publishes `v0.1.0-cpu` and `v0.1.0-cuda` and updates both moving tags. Manually running on a version tag produces the same release tags. Ordinary branch commits do not publish images; no `latest` tag is published.
+
+The workflow builds each variant for `linux/amd64`, checks its PyTorch CUDA build and application/trainer imports without requiring a physical GPU, and runs unit tests before pushing. Authentication, build, or verification failures stop that variant's publish step. Actual GPU availability is checked later on the NVIDIA host.
+
 ## NVIDIA GPU workflow
 
 Install Docker Compose and NVIDIA Container Toolkit on the host, then run:

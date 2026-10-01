@@ -1,5 +1,6 @@
 services:
   trainer:
+    image: kamilkrawiec/piper-tts-training-workflow:cpu
     user: "${PIPER_UID:-1000}:${PIPER_GID:-1000}"
     build:
       context: .

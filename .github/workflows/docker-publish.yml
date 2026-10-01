@@ -1,0 +1,79 @@
+name: Publish Docker images
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            torch_index_url: https://download.pytorch.org/whl/cpu
+          - variant: cuda
+            torch_index_url: https://download.pytorch.org/whl/cu124
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Select image tags
+        id: tags
+        env:
+          IMAGE: kamilkrawiec/piper-tts-training-workflow
+          VARIANT: ${{ matrix.variant }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          echo 'tags<<EOF' >> "$GITHUB_OUTPUT"
+          echo "$IMAGE:$VARIANT" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" = tag ]; then
+            if ! [[ "$REF_NAME" =~ ^v[A-Za-z0-9_.-]+$ ]] || [ "${#REF_NAME}" -gt 123 ]; then
+              echo 'Invalid version tag for a Docker image.' >&2
+              exit 1
+            fi
+            echo "$IMAGE:$REF_NAME-$VARIANT" >> "$GITHUB_OUTPUT"
+          fi
+          echo EOF >> "$GITHUB_OUTPUT"
+      - name: Build image for verification
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: TORCH_INDEX_URL=${{ matrix.torch_index_url }}
+          tags: ${{ steps.tags.outputs.tags }}
+          load: true
+      - name: Verify PyTorch and application imports
+        env:
+          IMAGE: kamilkrawiec/piper-tts-training-workflow:${{ matrix.variant }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          test "$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          docker run --rm -e EXPECTED_VARIANT="$VARIANT" "$IMAGE" python -c 'import os, torch; print("PyTorch:", torch.__version__, "CUDA runtime:", torch.version.cuda); assert (torch.version.cuda is not None) == (os.environ["EXPECTED_VARIANT"] == "cuda"), "Incorrect PyTorch build"; import app.main; import piper.train.vits.lightning'
+      - name: Run unit tests
+        env:
+          IMAGE: kamilkrawiec/piper-tts-training-workflow:${{ matrix.variant }}
+        run: docker run --rm -v "$PWD/tests:/app/tests:ro" "$IMAGE" python -m unittest discover -s tests -v
+      - name: Push verified image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: TORCH_INDEX_URL=${{ matrix.torch_index_url }}
+          tags: ${{ steps.tags.outputs.tags }}
+          push: true
