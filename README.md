@@ -40,7 +40,23 @@ To move the recording project to the GPU host, copy the exported dataset ZIP and
 ## Training modes
 
 - **Fine-tune existing Piper checkpoint** is the default and requires a `.ckpt` path. The curated Polish medium checkpoint is `pl_PL-darkman-medium`, cached from a pinned Piper checkpoint dataset revision.
-- **Full training from scratch** omits `--ckpt_path`. It can optionally use `--model.vocoder_warmstart_ckpt`; that warm-start is recorded separately from the training mode. Small datasets display an informational warning but are not blocked.
+- **Full training from scratch** omits `--ckpt_path`. It can optionally use `--model.vocoder_warmstart_ckpt`; that warm-start is recorded separately from the training mode. Around one hour of speech may be insufficient for a high-quality voice, but the experiment is not blocked.
+
+The recommended starting caps are **1000 epochs for fine-tuning** and **2000 for training from scratch**. Fine-tuning also offers 250 and 500 epoch experiments; scratch training offers a 500 epoch experiment. These are starting points, not universal quality optima. Automatic early stopping is disabled. Compare the same held-out listening sentences from interval checkpoints before deciding which voice sounds best.
+
+## Automatic training settings and estimates
+
+Batch size defaults to **Auto**. On CUDA, a separate short Piper training process tries progressively larger batches using real dataset samples and forward/backward work. Each trial records its outcome and peak VRAM. The chosen batch must leave configurable memory headroom; an out-of-memory trial cannot damage the subsequent training process. The run stays on one GPU. On CPU, Auto uses available RAM, the longest utterance, and dataset size to choose a conservative batch of 4, 8, or 16. You can manually choose a batch size in Advanced settings.
+
+DataLoader workers and PyTorch CPU threads also default to **Auto**. The worker heuristic reserves CPU capacity for the trainer and operating system; CPU training gets fewer workers because its model computation already uses CPU cores. Actual resolved worker, thread, and batch settings are saved in `run-config.json`, along with the command, batch probe results, hardware information, and the effective learning-rate schedule. Advanced settings allow manual overrides. Docker Desktop may impose CPU and RAM VM limits; Compose does not set an artificial CPU limit.
+
+The training panel shows current epoch, global optimizer step, estimated total optimizer steps, batches per epoch, throughput, elapsed time, and an **estimated** finish time. ETA appears after five warm-up batches and at least ten measured batches, then uses recent batch times. Validation, checkpoint writing, and changing input lengths can shift the finish time. An optional GPU hourly rate estimates compute cost only; storage and provider fees are excluded.
+
+Each run saves CPU/RAM and GPU samples every five seconds in `hardware-metrics.jsonl`. GPU compute utilization, GPU memory utilization, and allocated VRAM are separate measurements. Low VRAM allocation alone is not a performance fault; training throughput is the goal. The diagnostics section reports the trainer's PyTorch/CUDA versions, visible GPU, available CPU cores, RAM, and automatic defaults. Possible bottlenecks are hints, not certain diagnoses.
+
+The pinned Piper revision has fixed per-epoch generator/discriminator learning-rate decays of `0.999875`/`0.9999` by default. Changing `max_epochs` changes the **final learning-rate ratio**, but does not recalculate the per-epoch decay. A checkpoint can carry different initial rates or decays; each run records the effective model values after loading it. Therefore a 250-epoch run is not equivalent to the final result of a 1000-epoch run. For controlled 30-minute versus 60-minute comparisons, use the same base checkpoint, model configuration, seed, epoch cap, learning-rate policy, and listening sentences. The 60-minute dataset naturally has more batches and optimizer steps per epoch.
+
+Training keeps a rolling latest checkpoint every 25 epochs, interval checkpoints every 250 epochs, and a final checkpoint. The Voice step can export any saved checkpoint for listening comparison. Avoiding a checkpoint every epoch limits disk use and pause time.
 
 Every run stores `run-config.json`, the actual command, status, `train.log`, and CSV loss metrics in the project's persistent run directory. Training runs as a separate process, so closing the browser or losing its connection does not stop it. Reopen the project to see saved progress. Stopping the trainer container interrupts the process. The command uses Piper `v1.3.0`, PyTorch `2.6.0`, and pinned training dependency constraints with Python Lightning CPU/GPU accelerator selection. Runs do not send recordings or model files to a remote service.
 
@@ -96,7 +112,7 @@ The recording UI estimates duration from word count at 140 words per minute. It 
 
 - This is a single-speaker v1 workflow at Piper medium configuration and 22,050 Hz. Piper applies its seeded internal validation split to the training-only metadata; the fixed validation and test samples remain available for external listening and model-to-model comparison.
 - Browser recording requires microphone permission and a secure browser context (localhost is treated as secure by modern browsers).
-- Training quality depends on recording conditions, transcription fidelity, dataset size, and checkpoint compatibility. Training time is hardware-dependent and is not estimated here.
+- Training quality depends on recording conditions, transcription fidelity, dataset size, and checkpoint compatibility. The measured training ETA is approximate and becomes available only after warm-up batches.
 - The manager allows one active training job per project. A completed run can be exported from its saved checkpoint. If the container stops during training, status is recovered from the persisted process record and logs; interrupted jobs may need to be restarted from a suitable checkpoint.
 - The UI is designed for local use. Do not expose port 7860 publicly without adding authentication and a protected reverse proxy.
 

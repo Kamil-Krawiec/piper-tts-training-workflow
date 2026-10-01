@@ -2,11 +2,18 @@
 
 from pathlib import PosixPath
 import inspect
+import json
 import logging
+import os
 import sys
 from pathlib import Path
 
 import torch
+
+if os.environ.get("PIPER_TORCH_THREADS"):
+    torch.set_num_threads(int(os.environ["PIPER_TORCH_THREADS"]))
+if os.environ.get("PIPER_TORCH_INTEROP_THREADS"):
+    torch.set_num_interop_threads(int(os.environ["PIPER_TORCH_INTEROP_THREADS"]))
 
 
 def main() -> None:
@@ -58,13 +65,30 @@ def main() -> None:
         def before_fit(self) -> None:
             """Initialize from checkpoint weights without resuming its old training epoch."""
             fit_config = self.config[self.subcommand]
-            if not fit_config.get("ckpt_path"):
-                return
-            self.model.load_state_dict(self._initial_state_dict)
-            del self._initial_state_dict
-            # LightningCLI builds Trainer.fit kwargs from config_init after this hook.
-            self.config_init[self.subcommand]["ckpt_path"] = None
-            logger.info("Loaded fine-tuning weights; starting a new training run at epoch 0.")
+            if fit_config.get("ckpt_path"):
+                self.model.load_state_dict(self._initial_state_dict)
+                del self._initial_state_dict
+                # LightningCLI builds Trainer.fit kwargs from config_init after this hook.
+                self.config_init[self.subcommand]["ckpt_path"] = None
+                logger.info("Loaded fine-tuning weights; starting a new training run at epoch 0.")
+            run_config_path = os.environ.get("PIPER_RUN_CONFIG_PATH")
+            if run_config_path:
+                path = Path(run_config_path)
+                config = json.loads(path.read_text(encoding="utf-8"))
+                hparams = self.model.hparams
+                epochs = int(config["max_epochs"])
+                config["effective_lr_schedule"] = {
+                    "generator_initial_lr": float(hparams.learning_rate),
+                    "discriminator_initial_lr": float(hparams.learning_rate_d),
+                    "generator_per_epoch_decay": float(hparams.lr_decay),
+                    "discriminator_per_epoch_decay": float(hparams.lr_decay_d),
+                    "generator_final_ratio": float(hparams.lr_decay) ** epochs,
+                    "discriminator_final_ratio": float(hparams.lr_decay_d) ** epochs,
+                    "max_epochs": epochs,
+                }
+                temporary = path.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
+                os.replace(temporary, path)
 
     piper_cli.VitsLightningCLI = CheckpointCompatibleCLI
 

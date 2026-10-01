@@ -14,6 +14,7 @@ services:
       GRADIO_TEMP_DIR: /data/tmp
       HOME: /tmp
       PORT: "7860"
+    shm_size: "2gb"
     restart: unless-stopped
 
   piper-api:

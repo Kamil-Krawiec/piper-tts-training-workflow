@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import math
+import os
 import struct
 import tempfile
 import unittest
@@ -16,8 +17,11 @@ class GuidedUITests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        with patch.dict("os.environ", {"PIPER_DATA_DIR": self.temp.name}):
-            from app import main
+        self.environment = patch.dict(os.environ, {"PIPER_DATA_DIR": self.temp.name,
+                                                   "GRADIO_TEMP_DIR": str(Path(self.temp.name) / "tmp")})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        from app import main
         from app.projects import ProjectStore
         from app.training import TrainingJobs
         self.ui = main
@@ -127,6 +131,16 @@ class GuidedUITests(unittest.TestCase):
             self.ui.start_training(project["id"], "saved", "scratch", "", "", "cpu", 4, 42, 10)
         config = start.call_args.args[1]
         self.assertEqual(start.call_args.kwargs["run_id"], Path(config["run_dir"]).name)
+
+    def test_training_view_explains_missing_loss_metrics(self):
+        project = self.store.create_project("Narrator")
+        state = {"run_id": "failed-run", "status": "failed", "progress": {
+            "current_epoch": 0, "completed_epochs": 0, "max_epochs": 10, "losses": [],
+        }}
+        with patch.object(self.ui.JOBS, "status", return_value=state):
+            summary, chart, _ = self.ui.training_view(project["id"])
+        self.assertIn("No loss metrics were saved", summary)
+        self.assertFalse(chart["visible"])
 
     def test_training_view_shows_saved_epoch_progress_and_loss_plot(self):
         project = self.store.create_project("Narrator")

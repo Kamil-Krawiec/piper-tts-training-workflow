@@ -18,8 +18,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.performance import epoch_cap_for
+
+
+def training_pythonpath() -> str:
+    """Make callback modules importable when Piper runs from a persisted run directory."""
+    return str(Path(__file__).resolve().parent.parent) + os.pathsep + os.environ.get("PYTHONPATH", "")
+
 
 def batch_size_for(device: str) -> int:
+    # CPU has no VRAM probe; keep a modest default until throughput is measured.
     return 8 if device == "cuda" else 4
 
 
@@ -46,17 +54,38 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         "--data.cache_dir", str(config["cache_dir"]),
         "--data.config_path", str(config["config_path"]),
         "--data.batch_size", str(int(config["batch_size"])),
+        "--data.num_workers", str(int(config.get("num_workers", 1))),
         "--data.validation_split", str(float(config.get("validation_split", 0.1))),
         "--data.num_test_examples", str(int(config.get("num_test_examples", 5))),
         "--trainer.accelerator", "gpu" if config["device"] == "cuda" else "cpu",
         "--trainer.devices", "1",
-        "--trainer.max_epochs", str(int(config.get("max_epochs", 1000))),
+        "--trainer.max_epochs", str(1 if config.get("probe") else int(config.get("max_epochs", epoch_cap_for(mode)))),
         "--trainer.default_root_dir", str(run_dir),
         "--trainer.logger", json.dumps(csv_logger),
         "--trainer.log_every_n_steps", "10",
         "--trainer.enable_progress_bar", "false",
         "--seed_everything", str(int(config.get("seed", 42))),
     ]
+    if config.get("probe"):
+        callbacks = [{"class_path": "app.training_metrics.ProbeMetrics", "init_args": {
+            "path": str(run_dir / "probe-result.json")}}]
+        command.extend(("--trainer.limit_train_batches", str(int(config.get("probe_batches", 12))),
+                        "--trainer.limit_val_batches", "0", "--trainer.num_sanity_val_steps", "0",
+                        "--trainer.enable_checkpointing", "false", "--trainer.callbacks", json.dumps(callbacks)))
+    else:
+        callbacks = [{"class_path": "app.training_metrics.TrainingMetrics", "init_args": {
+            "path": str(run_dir / "training-metrics.json"),
+            "steps_per_epoch": int(config.get("steps_per_epoch", 0)),
+            "max_epochs": int(config.get("max_epochs", epoch_cap_for(mode))),
+            "hourly_rate": config.get("gpu_hourly_rate")}}]
+        callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
+            "dirpath": str(run_dir / "checkpoints"), "filename": "epoch-{epoch:04d}",
+            "auto_insert_metric_name": False, "every_n_epochs": int(config.get("checkpoint_interval", 250)),
+            "save_top_k": -1, "save_last": False}})
+        callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
+            "dirpath": str(run_dir / "checkpoints" / "latest"), "filename": "rolling",
+            "every_n_epochs": 25, "save_top_k": 0, "save_last": True}})
+        command.extend(("--trainer.callbacks", json.dumps(callbacks)))
     if config["device"] not in {"cpu", "cuda"}:
         raise ValueError("device must be cpu or cuda")
     if mode == "finetune":
@@ -164,11 +193,15 @@ class TrainingJobs:
             run_dir = self._run_dir(project_id, run_id)
             run_dir.mkdir(parents=True, exist_ok=False)
             command = build_training_command({**config, "run_dir": run_dir})
-            actual = {**config, "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(), "command": command}
+            actual = {**config, "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
+                      "resolution_status": "pending", "command": command}
             (run_dir / "run-config.json").write_text(json.dumps(actual, indent=2), encoding="utf-8")
             (run_dir / "status.json").write_text(json.dumps({"status": "preparing", "updated_at": time.time()}), encoding="utf-8")
             with (run_dir / "train.log").open("ab") as log_file:
-                process = subprocess.Popen(command, cwd=run_dir, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+                launch = [sys.executable, "-m", "app.train_run", str(run_dir / "run-config.json")]
+                environment = {**os.environ, "PYTHONPATH": training_pythonpath()}
+                process = subprocess.Popen(launch, cwd=run_dir, env=environment, stdout=log_file,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
             self._processes[run_id] = process
             (run_dir / "pid").write_text(str(process.pid), encoding="ascii")
             status = {"status": "training", "pid": process.pid, "updated_at": time.time(), "command": command}
@@ -198,6 +231,21 @@ class TrainingJobs:
                 state["log_tail"] = _tail(run_dir / "train.log")
                 state["config"] = json.loads((run_dir / "run-config.json").read_text(encoding="utf-8"))
                 state["progress"] = _training_progress(run_dir, state["config"])
+                metrics = run_dir / "training-metrics.json"
+                if metrics.is_file():
+                    try:
+                        state["performance"] = json.loads(metrics.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        pass
+                hardware = run_dir / "hardware-metrics.jsonl"
+                if hardware.is_file():
+                    try:
+                        recent = [json.loads(line) for line in _tail(hardware, 10).splitlines() if line.strip()]
+                        state["hardware"] = recent[-1] if recent else None
+                        values = [item["gpu"]["compute_percent"] for item in recent if item.get("gpu") and item["gpu"].get("compute_percent") is not None]
+                        state["gpu_compute_average"] = round(sum(values) / len(values), 1) if values else None
+                    except (OSError, ValueError):
+                        pass
                 return state
         return None
 
@@ -237,7 +285,9 @@ def _tail(path: Path, lines: int = 60) -> str:
 def _training_progress(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     """Read the trainer's durable CSV metrics; an incomplete last row is ignored."""
     maximum = int(config.get("max_epochs", 0))
-    result: dict[str, Any] = {"max_epochs": maximum, "current_epoch": 0, "completed_epochs": 0, "losses": []}
+    result: dict[str, Any] = {"max_epochs": maximum, "current_epoch": 0, "completed_epochs": 0,
+                              "global_step": 0, "steps_per_epoch": int(config.get("steps_per_epoch", 0)),
+                              "total_optimizer_steps": int(config.get("total_optimizer_steps", 0)), "losses": []}
     path = run_dir / "metrics" / "version_0" / "metrics.csv"
     if not path.is_file():
         return result
@@ -248,6 +298,8 @@ def _training_progress(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
                     continue
                 epoch = int(float(row["epoch"])) + 1
                 result["current_epoch"] = max(result["current_epoch"], epoch)
+                if row.get("step"):
+                    result["global_step"] = max(result["global_step"], int(float(row["step"])))
                 for key, label in (("loss_g", "Training"), ("val_loss", "Validation")):
                     if row.get(key):
                         if key == "val_loss":

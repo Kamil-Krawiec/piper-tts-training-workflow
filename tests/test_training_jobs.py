@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.training import TrainingJobs, _process_exists
 
@@ -23,21 +23,19 @@ class TrainingJobsTests(unittest.TestCase):
         run_dir = self.root / "projects" / self.project_id / "runs" / run_id
         config = {"run_dir": str(run_dir), "cache_dir": str(run_dir / "cache"), "config_path": str(run_dir / "voice.onnx.json"), "max_epochs": 10}
         jobs = TrainingJobs(self.root)
-        with patch("app.training.build_training_command", return_value=[sys.executable, "-c", "pass"]):
+        fake_process = Mock(pid=os.getpid())
+        with patch("app.training.build_training_command", return_value=[sys.executable, "-c", "pass"]), patch("app.training.subprocess.Popen", return_value=fake_process) as launch:
             self.assertEqual(jobs.start(self.project_id, config, run_id=run_id), run_id)
-        jobs._processes[run_id].wait(timeout=5)
+        self.assertEqual(launch.call_args.args[0][1:3], ["-m", "app.train_run"])
         saved = json.loads((run_dir / "run-config.json").read_text())
         self.assertEqual(saved["config_path"], str(run_dir / "voice.onnx.json"))
         self.assertEqual(saved["cache_dir"], str(run_dir / "cache"))
 
     def test_running_job_survives_manager_recreation(self):
         config = {"max_epochs": 2}
-        script = "import time; time.sleep(2)"
         jobs = TrainingJobs(self.root)
-        with patch("app.training.build_training_command", return_value=[sys.executable, "-c", script]):
+        with patch("app.training.build_training_command", return_value=[sys.executable, "-c", "pass"]), patch("app.training.subprocess.Popen", return_value=Mock(pid=os.getpid())):
             run_id = jobs.start(self.project_id, config)
-        process = jobs._processes[run_id]
-        self.addCleanup(lambda: (process.terminate(), process.wait(timeout=5)) if process.poll() is None else None)
         reopened = TrainingJobs(self.root)
         self.assertEqual(reopened.status(self.project_id)["status"], "training")
 

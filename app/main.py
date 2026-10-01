@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from app.inference import synthesize
 from app.projects import ProjectStore
 from app.text import estimate_text, parse_prompts, prompt_recommendation
 from app.training import TrainingJobs, batch_size_for, validate_training_config
+from app.performance import cpu_snapshot, epoch_cap_for, effective_cpu_count, gpu_snapshot, physical_cpu_count, workers_for
 from app.workflow import WorkflowProgress
 from app.ui import APP_CSS, step_heading
 
@@ -449,7 +451,42 @@ def save_uploaded_checkpoint(path: str | None):
         return "", f"Checkpoint upload failed: {error}"
 
 
-def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: int, seed: int, max_epochs: int):
+def _setting(value: Any, custom: Any, allowed: set[int], name: str) -> tuple[str, int | None]:
+    if value in ("Auto", 0, "0", None):
+        return "auto", None
+    selected = custom if value == "Custom" else value
+    try:
+        number = int(selected)
+        if float(selected) != number:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a whole number") from None
+    if number < 1 or (allowed and value != "Custom" and number not in allowed):
+        raise ValueError(f"{name} must be a positive whole number")
+    if number > 256:
+        raise ValueError(f"{name} cannot exceed 256")
+    return "manual", number
+
+
+def _training_options(device: str, batch: Any, custom_batch: Any, workers: Any, custom_workers: Any,
+                      threads: Any, hourly_rate: Any) -> dict[str, Any]:
+    batch_mode, batch_value = _setting(batch, custom_batch, {4, 8, 16, 32, 64}, "Batch size")
+    worker_mode, worker_value = _setting(workers, custom_workers, {1, 2, 4, 8}, "DataLoader workers")
+    thread_mode, thread_value = _setting(threads, threads, set(), "PyTorch CPU threads")
+    try:
+        rate = None if hourly_rate in (None, "") else float(hourly_rate)
+    except (TypeError, ValueError):
+        raise ValueError("GPU cost per hour must be a number") from None
+    if rate is not None and (not math.isfinite(rate) or rate < 0):
+        raise ValueError("GPU cost per hour must be a finite non-negative number")
+    return {"batch_size_mode": batch_mode, "batch_size": batch_value or batch_size_for(device),
+            "num_workers_mode": worker_mode, "num_workers": worker_value or workers_for(device, physical_cpu_count(), effective_cpu_count()),
+            "torch_threads_mode": thread_mode, "torch_threads": thread_value,
+            "gpu_hourly_rate": rate}
+
+
+def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: Any, seed: int, max_epochs: int,
+                   custom_batch: Any = None, workers: Any = "Auto", custom_workers: Any = None, threads: Any = "Auto", hourly_rate: Any = None):
     try:
         dataset = _selected_dataset(project_id, dataset_name)
         selected_device = device
@@ -477,9 +514,11 @@ def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_pat
             "checkpoint": (checkpoint_path or None) if mode == "finetune" else None,
             "checkpoint_id": ("pl_PL-darkman-medium" if checkpoint_path and "pl_PL-darkman-medium" in checkpoint_path else "local-or-uploaded") if mode == "finetune" and checkpoint_path else None,
             "vocoder_warmstart_checkpoint": warmstart_path or None, "device": selected_device,
-            "batch_size": int(batch_size) if int(batch_size) > 0 else batch_size_for(selected_device), "seed": int(seed), "max_epochs": int(max_epochs),
+            **_training_options(selected_device, batch_size, custom_batch, workers, custom_workers, threads, hourly_rate),
+            "seed": int(seed), "max_epochs": int(max_epochs),
             "validation_split": 0.1, "num_test_examples": 5,
-            "piper_revision": "v1.3.0", "base_checkpoint_hash": _hash_if_exists(Path(checkpoint_path)) if mode == "finetune" and checkpoint_path else None,
+            "piper_revision": "fee9b9cefae4ebf9e196cfe994dea418f051506c",
+            "base_checkpoint_hash": _hash_if_exists(Path(checkpoint_path)) if mode == "finetune" and checkpoint_path else None,
         }
         errors = validate_training_config(config, cuda_available=has_cuda)
         if errors:
@@ -510,6 +549,28 @@ def _run_status_text(project_id: str):
     return f"Run: {status['run_id']} · Status: {status['status']}\n{status.get('log_tail','')}"
 
 
+def hardware_diagnostics() -> dict[str, Any]:
+    try:
+        import torch
+        torch_version, cuda_runtime, has_cuda = torch.__version__, torch.version.cuda, torch.cuda.is_available()
+        default_threads = torch.get_num_threads()
+    except ImportError:
+        torch_version, cuda_runtime, has_cuda, default_threads = "unavailable", None, False, None
+    cpu, _ = cpu_snapshot(os.getpid())
+    try:
+        model = next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name"))
+    except (OSError, StopIteration):
+        model = "unknown"
+    return {"PyTorch version": torch_version, "CUDA runtime": cuda_runtime, "CUDA available": has_cuda,
+            "GPU": gpu_snapshot(), "CPU model": model, "Physical CPU cores": physical_cpu_count(),
+            "Logical CPU cores available": effective_cpu_count(),
+            "RAM used / total bytes": [cpu.get("ram_used_bytes"), cpu.get("ram_total_bytes")],
+            "Piper revision": "fee9b9cefae4ebf9e196cfe994dea418f051506c",
+            "Auto GPU DataLoader workers": workers_for("cuda", physical_cpu_count(), effective_cpu_count()),
+            "Auto CPU DataLoader workers": workers_for("cpu", physical_cpu_count(), effective_cpu_count()),
+            "PyTorch default threads": default_threads}
+
+
 def training_view(project_id: str | None):
     """Return a concise saved summary, optional loss history, and diagnostic logs."""
     if not STORE.has_project(project_id):
@@ -523,17 +584,71 @@ def training_view(project_id: str | None):
     completed = min(progress["completed_epochs"], maximum) if maximum else 0
     percentage = round(100 * completed / maximum) if maximum else 0
     current = progress["current_epoch"]
-    phase = escape(state["status"].replace("_", " ").title())
+    phase = escape(("preparing" if state["status"] == "training" and (state.get("config") or {}).get("resolution_status") == "pending"
+                    else state["status"]).replace("_", " ").title())
     epoch_label = f"Epoch {current} of {maximum}" if current else "Waiting for first epoch"
     run_label = escape(state["run_id"][:8])
+    performance = state.get("performance") or {}
+    hardware = state.get("hardware") or {}
+    config = state.get("config") or {}
+    gpu = hardware.get("gpu") or {}
+    cpu = hardware.get("cpu") or {}
+    estimate = performance.get("estimate") or {}
+    def duration(seconds: float | None) -> str:
+        if seconds is None:
+            return "Measuring"
+        minutes = max(0, round(seconds / 60))
+        return f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
+    eta = duration(estimate.get("remaining_seconds"))
+    finish = datetime.fromtimestamp(estimate["estimated_finish_at"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if estimate.get("estimated_finish_at") else "Measuring"
+    gib = 1024 ** 3
+    gpu_summary = (f"GPU: {escape(str(gpu.get('name') or config.get('gpu') or 'not detected'))} · "
+                   f"compute {gpu.get('compute_percent', '—')}% · memory {gpu.get('memory_percent', '—')}% · "
+                   f"VRAM {(gpu.get('memory_used_bytes') or 0) / gib:.1f} / {(gpu.get('memory_total_bytes') or 0) / gib:.1f} GiB · "
+                   f"{gpu.get('power_w', '—')} W · {gpu.get('temperature_c', '—')} °C") if config.get("device") == "cuda" else "CPU training"
+    cpu_summary = (f"CPU: {cpu.get('total_percent', '—')}% across {cpu.get('logical_cores', '—')} logical cores · "
+                   f"RAM {(cpu.get('ram_used_bytes') or 0) / gib:.1f} / {(cpu.get('ram_total_bytes') or 0) / gib:.1f} GiB")
+    cost = (f" · estimated remaining compute cost ${estimate['remaining_cost']:.2f} · estimated total compute cost ${estimate['total_cost']:.2f}"
+            if "remaining_cost" in estimate else "")
+    average_gpu = state.get("gpu_compute_average")
+    hint = ""
+    if config.get("device") == "cuda" and average_gpu is not None and average_gpu < 50:
+        cpu_load = cpu.get("total_percent")
+        hint = ("Possible bottleneck: CPU or data loading" if cpu_load is not None and cpu_load >= 75
+                else "Possible bottleneck: small batches or synchronization overhead")
+    resolving = config.get("resolution_status") == "pending"
+    details = (f"Batch size: {'resolving' if resolving else config.get('batch_size', 'resolving')} · "
+               f"DataLoader workers: {'resolving' if resolving else config.get('num_workers', 'resolving')} · "
+               f"PyTorch threads: {config.get('torch_threads', 'resolving')} · "
+               f"steps/second: {round(performance['steps_per_second'], 2) if performance.get('steps_per_second') else 'measuring'} · "
+               f"seconds/step: {round(1 / performance['steps_per_second'], 2) if performance.get('steps_per_second') else 'measuring'} · "
+               f"samples/second: {round(performance['samples_per_second'], 2) if performance.get('samples_per_second') else 'measuring'} · "
+               f"process CPU: {cpu.get('process_percent', '—')}% · per-core CPU: {escape(str(cpu.get('per_core_percent', [])))} · "
+               f"GPU power limit: {gpu.get('power_limit_w', '—')} W · SM/memory clocks: "
+               f"{gpu.get('sm_clock_mhz', '—')} / {gpu.get('memory_clock_mhz', '—')} MHz")
+    schedule = config.get("effective_lr_schedule") or {}
+    if schedule:
+        details += (f" · initial generator/discriminator LR: {schedule['generator_initial_lr']} / {schedule['discriminator_initial_lr']}"
+                    f" · per-epoch decay: {schedule['generator_per_epoch_decay']} / {schedule['discriminator_per_epoch_decay']}"
+                    f" · final LR ratio: {schedule['generator_final_ratio']:.3f} / {schedule['discriminator_final_ratio']:.3f}")
     summary = (
         f'<div class="train-summary"><div class="train-summary-head"><strong>{phase}</strong>'
         f'<span>Run {run_label}</span></div><p>{epoch_label} · {percentage}% of epochs completed</p>'
         f'<div class="train-progress" role="progressbar" aria-label="Completed training epochs" '
         f'aria-valuenow="{completed}" aria-valuemin="0" aria-valuemax="{maximum or 1}">'
-        f'<span style="width:{percentage}%"></span></div></div>'
+        f'<span style="width:{percentage}%"></span></div>'
+        f'<p>Global optimizer step {performance.get("global_step", progress.get("global_step", 0))} / '
+        f'{config.get("total_optimizer_steps", progress.get("total_optimizer_steps", "—"))} · '
+        f'{config.get("steps_per_epoch", progress.get("steps_per_epoch", "—"))} batches/epoch</p>'
+        f'<p>Elapsed: {duration(performance.get("elapsed_seconds"))} · Average epoch: '
+        f'{duration(performance.get("average_epoch_seconds"))} · Estimated remaining: {eta} · '
+        f'Estimated finish: {finish}{cost}</p>'
+        f'<p>{gpu_summary}<br>{cpu_summary}</p><p>{escape(hint)}</p>'
+        f'<details><summary>Training diagnostics</summary>{details}</details></div>'
     )
     losses = progress["losses"]
+    if not losses:
+        summary += "<p>Loss chart will appear after the first logged training batches. No loss metrics were saved for this run yet.</p>"
     chart = gr.update(value=pd.DataFrame(losses) if losses else None, visible=bool(losses))
     logs = f"Run: {state['run_id']} · Status: {state['status']}\n{state.get('log_tail', '')}"
     return summary, chart, logs
@@ -562,21 +677,45 @@ def run_choices(project_id: str):
     return choices
 
 
-def export_run(project_id: str, run_id: str, voice_name: str):
+def checkpoint_choices(project_id: str, run_id: str | None) -> list[tuple[str, str]]:
+    if not STORE.has_project(project_id) or not run_id:
+        return []
+    run_dir = STORE.project_dir(project_id) / "runs" / Path(run_id).name
+    choices = []
+    for path in sorted(run_dir.rglob("*.ckpt")) if run_dir.is_dir() else []:
+        label = path.name
+        if path.stem.startswith("epoch-"):
+            try:
+                label = f"After epoch {int(path.stem.split('-', 1)[1]) + 1} · {path.name}"
+            except ValueError:
+                pass
+        choices.append((label, str(path)))
+    return choices
+
+
+def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None = None):
     try:
         run_dir = STORE.project_dir(project_id) / "runs" / Path(run_id).name
         if not run_dir.is_dir():
             raise ValueError("Select a training run")
         checkpoints = list(run_dir.rglob("*.ckpt"))
-        checkpoints = [path for path in checkpoints if "last" not in path.name.lower()]
-        if not checkpoints:
-            checkpoints = list(run_dir.rglob("*.ckpt"))
         if not checkpoints:
             raise ValueError("No training checkpoint is available in this run yet")
+        if checkpoint_path:
+            chosen = Path(checkpoint_path).resolve()
+            if chosen not in {path.resolve() for path in checkpoints}:
+                raise ValueError("Selected checkpoint does not belong to this run")
+        else:
+            preferred = [path for path in checkpoints if "last" not in path.name.lower()]
+            chosen = max(preferred or checkpoints, key=lambda path: path.stat().st_mtime)
         config = run_dir / "voice.onnx.json"
-        output = STORE.project_dir(project_id) / "models" / validate_voice_name(voice_name)
-        model, config_file = export_onnx(max(checkpoints, key=lambda path: path.stat().st_mtime), config, output, voice_name)
-        archive = DATA_DIR / "exports" / f"{voice_name}.piper-model.zip"
+        export_name = voice_name
+        if checkpoint_path and chosen.stem.startswith("epoch-"):
+            export_name += f"-epoch-{int(chosen.stem.split('-', 1)[1]) + 1}"
+        export_name = validate_voice_name(export_name)
+        output = STORE.project_dir(project_id) / "models" / export_name
+        model, config_file = export_onnx(chosen, config, output, export_name)
+        archive = DATA_DIR / "exports" / f"{export_name}.piper-model.zip"
         archive.parent.mkdir(parents=True, exist_ok=True)
         package_model(model, config_file, archive)
         choices = model_choices(project_id)
@@ -631,7 +770,8 @@ def publish_selected(model_path: str):
         return f"Publish failed: {error}"
 
 
-def prepare_training_summary(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: int, seed: int, max_epochs: int):
+def prepare_training_summary(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: Any, seed: int, max_epochs: int,
+                             custom_batch: Any = None, workers: Any = "Auto", custom_workers: Any = None, threads: Any = "Auto", hourly_rate: Any = None):
     try:
         dataset = _selected_dataset(project_id, dataset_name)
         manifest = json.loads((dataset / "dataset.json").read_text(encoding="utf-8")) if (dataset / "dataset.json").exists() else {}
@@ -648,7 +788,8 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
         if selected_device == "auto":
             selected_device = "cuda" if has_cuda else "cpu"
         project = STORE.get_project(project_id)
-        actual_batch = int(batch_size) if int(batch_size) > 0 else batch_size_for(selected_device)
+        options = _training_options(selected_device, batch_size, custom_batch, workers, custom_workers, threads, hourly_rate)
+        actual_batch = ("Auto (short training probe)" if selected_device == "cuda" else "Auto (RAM and longest utterance)") if options["batch_size_mode"] == "auto" else options["batch_size"]
         return (
             f"### Review this run before starting\n\n"
             f"Dataset: **{dataset.name}** · Samples: **{manifest.get('sample_count', 'imported')}** · "
@@ -661,8 +802,12 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
             f"Mode: **{'Fine-tune' if mode == 'finetune' else 'Full training from scratch'}** · "
             f"Checkpoint: **{Path(checkpoint_path).name if mode == 'finetune' and checkpoint_path else 'none'}** · "
             f"Vocoder warm-start: **{Path(warmstart_path).name if mode == 'scratch' and warmstart_path else 'none'}**\n\n"
-                f"Sample rate: **22050 Hz** · eSpeak: **{project['espeak_voice']}** · Device: **{selected_device.upper()}** · Batch size: **{actual_batch}**\n\n"
-            f"Maximum epochs: **{int(max_epochs)}** · Seed: **{int(seed)}** · Piper internal validation: **10% / 5 test examples**",
+            f"Sample rate: **22050 Hz** · eSpeak: **{project['espeak_voice']}** · Device: **{selected_device.upper()}** · Batch size: **{actual_batch}** · "
+            f"DataLoader workers: **{workers}**\n\n"
+            f"Maximum epochs: **{int(max_epochs)}** · Seed: **{int(seed)}** · Piper internal validation: **10% / 5 test examples**\n\n"
+            f"**Training time estimate:** available after warm-up and at least 10 measured training batches. "
+            f"The {int(max_epochs)}-epoch cap is a starting point, not a quality guarantee. "
+            f"Piper's fixed per-epoch learning-rate decay gives a different final ratio when this cap changes.",
             "Review the summary. Click START TRAINING to launch the persisted job.",
         )
     except Exception as error:
@@ -846,14 +991,25 @@ def build_app() -> gr.Blocks:
                     with gr.Accordion("Upload your own checkpoint", open=False):
                         checkpoint_upload = gr.File(label="Piper .ckpt file", file_types=[".ckpt"], type="filepath")
                         checkpoint_upload_button = gr.Button("Save uploaded checkpoint")
-                scratch_warning = gr.Markdown("**Training from scratch:** No base voice checkpoint will be used. Small datasets may produce poorer results than fine-tuning.", visible=False)
+                scratch_warning = gr.Markdown("**Training from scratch:** No base voice checkpoint will be used. Around one hour of speech may be insufficient for a high-quality voice.", visible=False)
                 warmstart_checkbox = gr.Checkbox(label="Optionally warm-start the vocoder from a checkpoint", value=False, visible=False)
                 warmstart_path = gr.Textbox(label="Vocoder warm-start checkpoint path", visible=False)
+                duration_preset = gr.Radio([("Recommended starting cap · 1000 epochs", "1000"), ("Quick experiment · 250 epochs", "250"),
+                                            ("Medium experiment · 500 epochs", "500"), ("Custom", "custom")],
+                                           value="1000", label="Training duration",
+                                           info="Epoch caps are starting points. Listen to saved checkpoints to judge voice quality.")
                 with gr.Accordion("Device and training settings", open=False):
                     device = gr.Radio([("Automatic", "auto"), ("CPU", "cpu"), ("NVIDIA GPU / CUDA", "cuda")], value="auto", label="Training device", info="Automatic uses CUDA when available. CPU training can take much longer.")
-                    batch_size = gr.Number(value=0, precision=0, minimum=0, label="Batch size (0 = automatic)")
+                    batch_size = gr.Dropdown(["Auto", "4", "8", "16", "32", "64", "Custom"], value="Auto", label="Batch size")
+                    custom_batch = gr.Number(value=8, precision=0, minimum=1, label="Custom batch size", visible=False)
+                    workers = gr.Dropdown(["Auto", "1", "2", "4", "8", "Custom"], value="Auto", label="DataLoader workers")
+                    custom_workers = gr.Number(value=2, precision=0, minimum=1, label="Custom DataLoader workers", visible=False)
+                    cpu_threads = gr.Number(value=0, precision=0, minimum=0, label="PyTorch CPU threads (0 = Auto)")
+                    gpu_hourly_rate = gr.Textbox(value="", label="GPU cost per hour in USD (optional)", placeholder="e.g. 0.34",
+                                                 info="Compute time only; storage and provider fees are excluded.")
                     max_epochs = gr.Number(value=1000, precision=0, minimum=1, maximum=100000, label="Maximum epochs")
                     training_seed = gr.Number(value=42, precision=0, minimum=0, label="Random seed")
+                    gr.Markdown("Piper uses fixed per-epoch learning-rate decay at this revision. Changing the epoch cap changes the final learning-rate ratio. Automatic early stopping is disabled.")
                 gr.Markdown("### Review and start")
                 prepare_button = gr.Button("Review run summary")
                 run_summary = gr.Markdown()
@@ -865,6 +1021,8 @@ def build_app() -> gr.Blocks:
                     run_chart = gr.LinePlot(x="epoch", y="loss", color="series", y_aggregate="mean", title="Loss over epochs", x_title="Epoch", y_title="Loss", height=260, visible=False)
                     with gr.Accordion("Recent trainer logs", open=False):
                         run_status = gr.Code(label="Latest log lines", language="shell", value="No training runs yet.")
+                    with gr.Accordion("Hardware diagnostics", open=False):
+                        gr.JSON(value=hardware_diagnostics, label="Trainer environment")
                     with gr.Row():
                         refresh_run_button = gr.Button("Refresh training status")
                         cancel_button = gr.Button("Stop training", variant="stop")
@@ -878,6 +1036,7 @@ def build_app() -> gr.Blocks:
                 step_heading(6, "Export and listen to your voice", "Export a saved training checkpoint as a Piper voice, test it locally, and download the model to use in your own applications.")
                 gr.Markdown("### 1. Export a trained voice\nSelect a run with a saved checkpoint. The download contains both the ONNX model and its JSON configuration.")
                 run_select = gr.Dropdown(label="Training run", value=None)
+                checkpoint_select = gr.Dropdown(label="Saved checkpoint", value=None, info="Select an interval checkpoint to listen before training finishes; leave empty for the latest.")
                 model_name = gr.Textbox(label="Voice filename", value="pl_PL-kamil-medium", info="Use letters, numbers, underscores, and hyphens.")
                 export_model_button = gr.Button("Export voice & prepare download", variant="primary")
                 model_status = gr.Markdown()
@@ -944,16 +1103,29 @@ def build_app() -> gr.Blocks:
         import_dataset_button.click(import_dataset_ui, [project_select, dataset_import_file], [dataset_select, train_dataset, dataset_transfer_status]).then(step_availability, project_select, step_tabs)
         download_checkpoint_button.click(lambda: download_base_checkpoint("pl_PL-darkman-medium"), outputs=[base_checkpoint_path, training_status])
         checkpoint_upload_button.click(save_uploaded_checkpoint, checkpoint_upload, [base_checkpoint_path, training_status])
-        training_mode.change(lambda mode: (gr.update(visible=(mode == "finetune")), gr.update(visible=(mode == "scratch")), gr.update(visible=(mode == "scratch"), value=False), gr.update(visible=False, value="")), training_mode, [finetune_panel, scratch_warning, warmstart_checkbox, warmstart_path])
+        training_mode.change(lambda mode: (gr.update(visible=(mode == "finetune")), gr.update(visible=(mode == "scratch")),
+                                           gr.update(visible=(mode == "scratch"), value=False), gr.update(visible=False, value=""),
+                                           gr.update(choices=[("Quick experiment · 500 epochs", "500"), ("Standard starting cap · 2000 epochs", "2000"), ("Custom", "custom")]
+                                                     if mode == "scratch" else [("Recommended starting cap · 1000 epochs", "1000"), ("Quick experiment · 250 epochs", "250"),
+                                                                                 ("Medium experiment · 500 epochs", "500"), ("Custom", "custom")],
+                                                     value=str(epoch_cap_for(mode))), gr.update(value=epoch_cap_for(mode))),
+                             training_mode, [finetune_panel, scratch_warning, warmstart_checkbox, warmstart_path, duration_preset, max_epochs])
+        duration_preset.change(lambda preset: gr.update(value=int(preset)) if preset != "custom" else gr.update(), duration_preset, max_epochs)
+        batch_size.change(lambda choice: gr.update(visible=choice == "Custom"), batch_size, custom_batch)
+        workers.change(lambda choice: gr.update(visible=choice == "Custom"), workers, custom_workers)
         warmstart_checkbox.change(lambda enabled: gr.update(visible=True) if enabled else gr.update(visible=False, value=""), warmstart_checkbox, warmstart_path)
-        prepare_button.click(prepare_training_summary, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [run_summary, training_status])
-        for setting in (train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs):
+        training_inputs = [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device,
+                           batch_size, training_seed, max_epochs, custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate]
+        prepare_button.click(prepare_training_summary, training_inputs, [run_summary, training_status])
+        for setting in (train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size,
+                        custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate, training_seed, max_epochs):
             setting.change(lambda: "", outputs=run_summary)
-        train_button.click(start_training, [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size, training_seed, max_epochs], [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
+        train_button.click(start_training, training_inputs, [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
         cancel_button.click(cancel_training, project_select, [training_status, run_status]).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart])
         refresh_run_button.click(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
         gr.Timer(10).tick(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart])
-        export_model_button.click(export_run, [project_select, run_select, model_name], [model_archive, model_status, model_select])
+        run_select.change(lambda pid, rid: gr.update(choices=checkpoint_choices(pid, rid), value=None), [project_select, run_select], checkpoint_select)
+        export_model_button.click(export_run, [project_select, run_select, model_name, checkpoint_select], [model_archive, model_status, model_select])
         model_select.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, compare_model_select)
         synth_button.click(synthesize_model, [model_select, local_test_text], [synth_audio, model_status])
         compare_button.click(compare_models, [model_select, compare_model_select, local_test_text], [compare_audio_a, compare_audio_b, model_status])
