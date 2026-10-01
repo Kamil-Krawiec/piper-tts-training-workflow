@@ -2,8 +2,8 @@ name: Publish Docker images
 
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -38,12 +38,12 @@ jobs:
           IMAGE: kamilkrawiec/piper-tts-training-workflow
           VARIANT: ${{ matrix.variant }}
           REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           echo 'tags<<EOF' >> "$GITHUB_OUTPUT"
           echo "$IMAGE:$VARIANT" >> "$GITHUB_OUTPUT"
           if [ "$REF_TYPE" = tag ]; then
-            if ! [[ "$REF_NAME" =~ ^v[A-Za-z0-9_.-]+$ ]] || [ "${#REF_NAME}" -gt 123 ]; then
+            if ! [[ "$REF_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || [ "${#REF_NAME}" -gt 123 ]; then
               echo 'Invalid version tag for a Docker image.' >&2
               exit 1
             fi

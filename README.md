@@ -45,7 +45,15 @@ In GitHub repository **Settings → Secrets and variables → Actions → New re
 - `DOCKERHUB_USERNAME`: the Docker Hub account with push access to `kamilkrawiec/piper-tts-training-workflow`.
 - `DOCKERHUB_TOKEN`: a Docker Hub access token with write permission, not the account password.
 
-After the workflow is on the default branch, open **Actions → Publish Docker images → Run workflow** to publish the moving `cpu` and `cuda` tags. Pushing a version tag such as `v0.1.0` also publishes `v0.1.0-cpu` and `v0.1.0-cuda` and updates both moving tags. Manually running on a version tag produces the same release tags. Ordinary branch commits do not publish images; no `latest` tag is published.
+Publishing a GitHub release triggers the image workflow using that release's Git tag. For example, after pushing the workflow changes to `master`, publish a release with GitHub CLI:
+
+```bash
+gh release create v0.1.0 --repo Kamil-Krawiec/piper-tts-training-workflow --target master --generate-notes
+```
+
+A release tagged `v0.1.0` publishes `v0.1.0-cpu` and `v0.1.0-cuda` and updates the moving `cpu` and `cuda` tags. Other Docker-compatible release tags use the same `<tag>-cpu` / `<tag>-cuda` suffixes. Publishing either a stable release or a prerelease triggers the workflow; drafts, ordinary commits, and tag pushes alone do not. No `latest` tag is published.
+
+Manual publishing remains available under **Actions → Publish Docker images → Run workflow** after the workflow is on the default branch. Running on a branch updates the moving tags; running on a tag also publishes its versioned image tags.
 
 The workflow builds each variant for `linux/amd64`, checks its PyTorch CUDA build and application/trainer imports without requiring a physical GPU, and runs unit tests before pushing. Authentication, build, or verification failures stop that variant's publish step. Actual GPU availability is checked later on the NVIDIA host.
 
