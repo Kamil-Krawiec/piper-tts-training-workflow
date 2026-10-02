@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -669,11 +670,21 @@ def run_choices(project_id: str):
     for path in sorted(root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True) if root.exists() else []:
         if not path.is_dir():
             continue
+        if not checkpoint_choices(project_id, path.name):
+            continue
         config_path = path / "run-config.json"
         config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
         mode = "Fine-tune" if config.get("training_mode") == "finetune" else "Scratch" if config.get("training_mode") == "scratch" else "Run"
-        saved = datetime.fromtimestamp(path.stat().st_mtime).strftime("%d %b %H:%M")
-        choices.append((f"{mode} · {saved} · {path.name[:8]}", path.name))
+        created = config.get("created_at")
+        saved = datetime.fromisoformat(created).strftime("%d %b %H:%M") if created else datetime.fromtimestamp(path.stat().st_mtime).strftime("%d %b %H:%M")
+        status_path = path / "status.json"
+        status = json.loads(status_path.read_text()).get("status", "saved") if status_path.is_file() else "saved"
+        dataset = config.get("dataset_id", "dataset")
+        manifest_path = STORE.project_dir(project_id) / "datasets" / Path(dataset).name / "dataset.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text())
+            dataset = f"{manifest.get('sample_count', '?')} samples · {_duration_label(manifest.get('total_seconds', 0))}"
+        choices.append((f"{config.get('voice_name', 'Voice')} · {mode} · {dataset} · up to {config.get('max_epochs', '?')} epochs · {status} · {saved} · {path.name[:8]}", path.name))
     return choices
 
 
@@ -681,24 +692,32 @@ def checkpoint_choices(project_id: str, run_id: str | None) -> list[tuple[str, s
     if not STORE.has_project(project_id) or not run_id:
         return []
     run_dir = STORE.project_dir(project_id) / "runs" / Path(run_id).name
+    checkpoints = []
+    for directory in (run_dir / "checkpoints", run_dir / "metrics/version_0/checkpoints"):
+        if directory.is_dir():
+            checkpoints.extend(path for path in directory.rglob("*.ckpt") if path.is_file() and path.stat().st_size)
     choices = []
-    for path in sorted(run_dir.rglob("*.ckpt")) if run_dir.is_dir() else []:
-        label = path.name
-        if path.stem.startswith("epoch-"):
-            try:
-                label = f"After epoch {int(path.stem.split('-', 1)[1]) + 1} · {path.name}"
-            except ValueError:
-                pass
-        choices.append((label, str(path)))
+    for path in sorted(checkpoints, key=lambda item: item.stat().st_mtime, reverse=True):
+        epoch = re.search(r"^epoch[-=](\d+)", path.stem)
+        label = f"After epoch {int(epoch[1]) + 1}" if epoch else "Final trained checkpoint" if path.stem == "final" else "Latest saved training checkpoint" if path.stem == "last" else path.stem
+        choices.append((f"{label} · {path.stat().st_size / 1024**2:.0f} MiB", str(path)))
     return choices
+
+
+def refresh_checkpoints(project_id: str, run_id: str | None, checkpoint_path: str | None = None):
+    choices = checkpoint_choices(project_id, run_id)
+    selected = checkpoint_path if checkpoint_path in {value for _, value in choices} else choices[0][1] if choices else None
+    return gr.update(choices=choices, value=selected, interactive=bool(choices)), gr.update(interactive=bool(choices))
 
 
 def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None = None):
     try:
+        if not run_id:
+            raise ValueError("Select a trained run with a saved checkpoint")
         run_dir = STORE.project_dir(project_id) / "runs" / Path(run_id).name
         if not run_dir.is_dir():
             raise ValueError("Select a training run")
-        checkpoints = list(run_dir.rglob("*.ckpt"))
+        checkpoints = [Path(value) for _, value in checkpoint_choices(project_id, run_id)]
         if not checkpoints:
             raise ValueError("No training checkpoint is available in this run yet")
         if checkpoint_path:
@@ -706,12 +725,12 @@ def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: s
             if chosen not in {path.resolve() for path in checkpoints}:
                 raise ValueError("Selected checkpoint does not belong to this run")
         else:
-            preferred = [path for path in checkpoints if "last" not in path.name.lower()]
-            chosen = max(preferred or checkpoints, key=lambda path: path.stat().st_mtime)
+            chosen = checkpoints[0]
         config = run_dir / "voice.onnx.json"
         export_name = voice_name
-        if checkpoint_path and chosen.stem.startswith("epoch-"):
-            export_name += f"-epoch-{int(chosen.stem.split('-', 1)[1]) + 1}"
+        epoch = re.search(r"^epoch[-=](\d+)", chosen.stem)
+        if checkpoint_path and epoch:
+            export_name += f"-epoch-{int(epoch[1]) + 1}"
         export_name = validate_voice_name(export_name)
         output = STORE.project_dir(project_id) / "models" / export_name
         model, config_file = export_onnx(chosen, config, output, export_name)
@@ -851,14 +870,21 @@ def reset_project_view(project_id: str | None):
     return text, None, mode, None, _run_status_text(project_id)
 
 
-def refresh_runs(project_id: str | None):
-    choices = run_choices(project_id)
+def refresh_training(project_id: str | None):
     summary, chart, logs = training_view(project_id)
+    return logs, summary, chart
+
+
+def refresh_runs(project_id: str | None, run_id: str | None = None, checkpoint_path: str | None = None):
+    choices = run_choices(project_id)
+    selected = run_id if run_id in {value for _, value in choices} else choices[0][1] if choices else None
+    logs, summary, chart = refresh_training(project_id)
     return (
         logs,
-        gr.update(choices=choices, value=choices[0][1] if choices else None),
+        gr.update(choices=choices, value=selected, interactive=bool(choices)),
         summary,
         chart,
+        *refresh_checkpoints(project_id, selected, checkpoint_path),
     )
 
 
@@ -1035,10 +1061,11 @@ def build_app() -> gr.Blocks:
             with gr.Tab("6 · Voice", id=6, interactive=progress.blocked_reason(6) is None, elem_classes="step-page") as voice_tab:
                 step_heading(6, "Export and listen to your voice", "Export a saved training checkpoint as a Piper voice, test it locally, and download the model to use in your own applications.")
                 gr.Markdown("### 1. Export a trained voice\nSelect a run with a saved checkpoint. The download contains both the ONNX model and its JSON configuration.")
-                run_select = gr.Dropdown(label="Training run", value=None)
-                checkpoint_select = gr.Dropdown(label="Saved checkpoint", value=None, info="Select an interval checkpoint to listen before training finishes; leave empty for the latest.")
+                refresh_voice_button = gr.Button("Refresh trained voices")
+                run_select = gr.Dropdown(label="Trained voice run", value=None, choices=[], interactive=False, filterable=False)
+                checkpoint_select = gr.Dropdown(label="Saved checkpoint", value=None, interactive=False, filterable=False, info="Only saved training checkpoints are shown. The newest is selected automatically.")
                 model_name = gr.Textbox(label="Voice filename", value="pl_PL-kamil-medium", info="Use letters, numbers, underscores, and hyphens.")
-                export_model_button = gr.Button("Export voice & prepare download", variant="primary")
+                export_model_button = gr.Button("Export voice & prepare download", variant="primary", interactive=False)
                 model_status = gr.Markdown()
                 model_archive = gr.File(label="Download voice ZIP", interactive=False)
                 gr.Markdown("### 2. Listen to the exported voice")
@@ -1077,7 +1104,7 @@ def build_app() -> gr.Blocks:
             reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status],
         ).then(
             lambda: ("",) * len(stale_text) + (None,) * len(stale_files), outputs=stale_text + stale_files,
-        ).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs).then(lambda: gr.update(selected=1), outputs=workflow_tabs)
+        ).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs).then(lambda: gr.update(selected=1), outputs=workflow_tabs)
         scroll_to_step = "() => { document.getElementById('workflow').scrollIntoView({behavior: 'smooth', block: 'start'}); }"
         for button, current, target in forward_buttons:
             button.click(lambda pid, source=current, destination=target: navigate_step(pid, source, destination), project_select, [workflow_tabs, workflow_status]).then(fn=None, js=scroll_to_step)
@@ -1120,11 +1147,13 @@ def build_app() -> gr.Blocks:
         for setting in (train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size,
                         custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate, training_seed, max_epochs):
             setting.change(lambda: "", outputs=run_summary)
-        train_button.click(start_training, training_inputs, [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
-        cancel_button.click(cancel_training, project_select, [training_status, run_status]).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart])
-        refresh_run_button.click(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
-        gr.Timer(10).tick(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart])
-        run_select.change(lambda pid, rid: gr.update(choices=checkpoint_choices(pid, rid), value=None), [project_select, run_select], checkpoint_select)
+        train_button.click(start_training, training_inputs, [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs)
+        cancel_button.click(cancel_training, project_select, [training_status, run_status]).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
+        refresh_run_button.click(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs)
+        gr.Timer(10).tick(refresh_training, project_select, [run_status, run_progress, run_chart])
+        refresh_voice_button.click(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
+        voice_tab.select(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
+        run_select.input(refresh_checkpoints, [project_select, run_select], [checkpoint_select, export_model_button])
         export_model_button.click(export_run, [project_select, run_select, model_name, checkpoint_select], [model_archive, model_status, model_select])
         model_select.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, compare_model_select)
         synth_button.click(synthesize_model, [model_select, local_test_text], [synth_audio, model_status])
@@ -1133,7 +1162,7 @@ def build_app() -> gr.Blocks:
         dataset_select.change(lambda pid, dataset: (gr.update(choices=evaluation_choices(pid, dataset), value=None), gr.update(value=dataset)), [project_select, dataset_select], [fixed_test_prompt, train_dataset])
         train_dataset.input(lambda dataset: gr.update(value=dataset), train_dataset, dataset_select)
         load_fixed_prompt_button.click(load_evaluation_prompt, [project_select, dataset_select, fixed_test_prompt], [local_test_text, reference_audio, model_status])
-        demo.load(load_app_state, project_select, [project_select, *project_state_outputs]).then(reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status]).then(refresh_runs, project_select, [run_status, run_select, run_progress, run_chart]).then(step_availability, project_select, step_tabs)
+        demo.load(load_app_state, project_select, [project_select, *project_state_outputs]).then(reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status]).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs)
     return demo
 
 

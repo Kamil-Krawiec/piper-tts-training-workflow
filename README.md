@@ -1,18 +1,88 @@
 # Piper Voice Trainer
 
-A local-first UI for preparing a known-text voice dataset, recording and reviewing samples, exporting portable Piper datasets, fine-tuning Piper, and testing exported ONNX voices.
+Record your voice, prepare a speech dataset, train a Piper voice, and export it for text-to-speech—all from a browser UI. Projects, recordings, training progress, and exported voices are saved locally.
 
-## Start the local CPU UI
+You can record and review samples on a CPU machine, then transfer a dataset ZIP to an NVIDIA GPU machine for training. The app supports fine-tuning an existing Piper checkpoint or training a single-speaker voice from scratch. Exported voices contain an ONNX model and its JSON configuration, ready for Piper inference.
+
+## Choose a Docker image
+
+Both images contain the same web application, Piper training tools, and voice export tools. They differ in the installed PyTorch build:
+
+| Image | Use it for | Requirements |
+| --- | --- | --- |
+| `kamilkrawiec/piper-tts-training-workflow:cpu` | Recording, dataset preparation, CPU training, export, and listening tests | Docker; no GPU required |
+| `kamilkrawiec/piper-tts-training-workflow:cuda` | The same workflow with NVIDIA GPU training | Docker, a compatible NVIDIA GPU and driver, and NVIDIA Container Toolkit |
+
+The images target Linux x86-64 (`linux/amd64`). Use the CUDA image on an NVIDIA GPU host, including RunPod. CPU training works but can take considerably longer.
+
+The `cpu` and `cuda` tags track the current published images. For repeatable runs, use an available versioned tag such as `<version>-cpu` or `<version>-cuda` from [Docker Hub](https://hub.docker.com/r/kamilkrawiec/piper-tts-training-workflow/tags). There is no `latest` tag.
+
+## Run a prebuilt image
+
+You do not need to clone this repository or build an image. `docker pull` downloads it; `docker run` starts the application. The following commands are for a Linux/macOS shell. GPU access requires an NVIDIA-compatible host/runtime.
+
+### CPU
 
 ```bash
-git clone <repo-url>
+docker pull kamilkrawiec/piper-tts-training-workflow:cpu
+mkdir -p data
+docker run -d --name piper-trainer \
+  --user "$(id -u):$(id -g)" \
+  --shm-size=2g \
+  -p 127.0.0.1:7860:7860 \
+  -v "$PWD/data:/data" \
+  kamilkrawiec/piper-tts-training-workflow:cpu
+```
+
+### NVIDIA GPU
+
+Install the NVIDIA driver and NVIDIA Container Toolkit on your GPU host, then run:
+
+```bash
+docker pull kamilkrawiec/piper-tts-training-workflow:cuda
+mkdir -p data
+docker run -d --name piper-trainer \
+  --user "$(id -u):$(id -g)" \
+  --gpus all \
+  --shm-size=2g \
+  -p 127.0.0.1:7860:7860 \
+  -v "$PWD/data:/data" \
+  kamilkrawiec/piper-tts-training-workflow:cuda
+```
+
+Choose one of these commands; both use the same container name and port. Open <http://localhost:7860> and allow microphone access when recording. On the GPU host, choose **Auto** or **CUDA** in the Train step. Explicit CUDA selection reports an error if the container cannot access the GPU.
+
+The mounted `data` folder keeps your work when the container is removed. The user option keeps files owned by your host account. Shared memory is set to 2 GiB so DataLoader workers have room to exchange training batches; this is not a limit on total container RAM.
+
+To inspect or restart the container:
+
+```bash
+docker logs -f piper-trainer
+docker stop piper-trainer
+docker start piper-trainer
+```
+
+Closing the browser does not stop training. Stopping the container interrupts it. To switch images, stop and remove the existing container with `docker rm piper-trainer`, then run the other image with the same data folder.
+
+## Build and run from this repository
+
+Use Compose if you want to build the image locally or work with the source code:
+
+```bash
+git clone https://github.com/Kamil-Krawiec/piper-tts-training-workflow.git
 cd piper-tts-training-workflow
 docker compose up --build
 ```
 
-Open <http://localhost:7860>. The first image build installs Piper's pinned training environment and can take several minutes. The normal app binds to `127.0.0.1` on the host and does not require a GPU.
+For an NVIDIA GPU build:
 
-The container defaults to host UID/GID `1000:1000` so files in `./data` remain editable by a typical Linux user. If `id -u` or `id -g` differs, set `PIPER_UID` and `PIPER_GID` in `.env` before starting Compose.
+```bash
+docker compose -f compose.yml -f compose.gpu.yml up --build
+```
+
+Open <http://localhost:7860>. The first build installs the training environment and can take several minutes. Both commands save your work in `./data` and bind the UI to localhost.
+
+Compose defaults to user/group `1000:1000`. If your Linux account uses different IDs, copy `.env.example` to `.env` and set `PIPER_UID` and `PIPER_GID` to the output of `id -u` and `id -g`. You can also set `PIPER_HOST_DATA_DIR` to store data elsewhere.
 
 ## Main workflow
 
@@ -25,82 +95,43 @@ The container defaults to host UID/GID `1000:1000` so files in `./data` remain e
 
 Each step reads from top to bottom and ends with Back/Continue navigation. Later steps unlock when their prerequisites are saved. **Resume saved progress** in Step 1 jumps to the next stage for an existing project. **Import a dataset ZIP** goes directly to Step 4 for the two-machine workflow. Switching projects clears temporary outputs from the previous workspace.
 
-## Docker Hub images
+## Record locally, train on another machine
 
-The publishing workflow builds Linux x86-64 (`linux/amd64`) images for the existing public repository `kamilkrawiec/piper-tts-training-workflow`:
+1. Record and accept your samples in the local UI.
+2. Build a dataset in the Dataset step and download its ZIP.
+3. Start the CUDA image on the GPU machine and import the ZIP in the Dataset step.
+4. Select a checkpoint and training settings, then start training.
+5. Export a saved checkpoint in the Voice step and download the voice ZIP.
 
-After the first successful publish:
+You only need the dataset ZIP for this transfer; the original recording project can stay on your recording machine. Microphone recording on a remote host requires a secure browser connection. Keep the UI private; the commands above expose it only on the host's localhost interface.
 
-```bash
-docker pull kamilkrawiec/piper-tts-training-workflow:cpu
-docker pull kamilkrawiec/piper-tts-training-workflow:cuda
-```
+## Training and progress
 
-The CUDA image requires an NVIDIA-compatible host and container runtime for GPU training. Use the CUDA image for RunPod; pin a release such as `v0.1.0-cuda` after that release is published. Both variants use the same Dockerfile and application code. Local Compose commands keep their existing `build:` support and do not require prebuilt Docker Hub images.
+**Fine-tuning** starts from an existing `.ckpt` checkpoint. The Train step offers an on-demand download of the curated Polish `pl_PL-darkman-medium` checkpoint, or you can supply your own compatible checkpoint. Downloads are cached in `data/checkpoints/`.
 
-### Publishing images (maintainers)
+**Training from scratch** starts a new model and can optionally use a vocoder warm-start checkpoint. It usually needs more data and training time. A small dataset does not guarantee a good voice in either mode.
 
-In GitHub repository **Settings → Secrets and variables → Actions → New repository secret**, add:
+Start with **Auto** batch size, DataLoader workers, and CPU threads. CUDA batch selection tests the dataset against available GPU memory; CPU settings use available memory and cores. Advanced settings let you override them.
 
-- `DOCKERHUB_USERNAME`: the Docker Hub account with push access to `kamilkrawiec/piper-tts-training-workflow`.
-- `DOCKERHUB_TOKEN`: a Docker Hub access token with write permission, not the account password.
+The Train step shows epoch progress, loss curves, throughput, hardware use, and an estimated finish time. Loss curves appear after logged batches; runtime estimates need enough measured batches and can change during training. Reopening the UI restores saved progress.
 
-Publishing a GitHub release triggers the image workflow using that release's Git tag. For example, after pushing the workflow changes to `master`, publish a release with GitHub CLI:
+Training saves a rolling checkpoint every 25 epochs, interval checkpoints every 250 epochs, and a final checkpoint. Use the Voice step to export and compare saved checkpoints on the same listening sentences. Epoch caps are starting points; choose the final voice by listening to its output.
 
-```bash
-gh release create v0.1.0 --repo Kamil-Krawiec/piper-tts-training-workflow --target master --generate-notes
-```
+## Use your exported voice
 
-A release tagged `v0.1.0` publishes `v0.1.0-cpu` and `v0.1.0-cuda` and updates the moving `cpu` and `cuda` tags. Other Docker-compatible release tags use the same `<tag>-cpu` / `<tag>-cuda` suffixes. Publishing either a stable release or a prerelease triggers the workflow; drafts, ordinary commits, and tag pushes alone do not. No `latest` tag is published.
+The Voice step exports a checkpoint as an ONNX model plus a matching JSON configuration and packages them in a downloadable ZIP. Keep both files together when loading the voice into Piper. You can also generate listening tests directly in the UI.
 
-Manual publishing remains available under **Actions → Publish Docker images → Run workflow** after the workflow is on the default branch. Running on a branch updates the moving tags; running on a tag also publishes its versioned image tags.
+### Optional text-to-speech API
 
-The workflow builds each variant for `linux/amd64`, checks its PyTorch CUDA build and application/trainer imports without requiring a physical GPU, and runs unit tests before pushing. Authentication, build, or verification failures stop that variant's publish step. Actual GPU availability is checked later on the NVIDIA host.
+The trainer is the browser app for recording and training. The separate `kamilkrawiec/piper-openai-tts` image serves exported voices through an OpenAI-compatible speech API.
 
-## NVIDIA GPU workflow
-
-Install Docker Compose and NVIDIA Container Toolkit on the host, then run:
+When running from the repository, export a voice and click **Publish to Piper API shared directory**, then start the API:
 
 ```bash
-docker compose -f compose.yml -f compose.gpu.yml up --build
+docker compose --profile inference up -d piper-api
 ```
 
-This builds the same UI with CUDA-enabled PyTorch and exposes the host GPU to the trainer container. Choose **Auto** to use CUDA when available or choose **CUDA** explicitly. An explicit CUDA request is rejected if the container cannot see CUDA; it will not silently run on CPU.
-
-To move the recording project to the GPU host, copy the exported dataset ZIP and import it from the Dataset tab. Recordings do not need to be copied. The curated Polish checkpoint is available in the Train tab as an on-demand download; it is cached in `data/checkpoints/` after download. Checkpoints are large, so the download is never automatic.
-
-## Training modes
-
-- **Fine-tune existing Piper checkpoint** is the default and requires a `.ckpt` path. The curated Polish medium checkpoint is `pl_PL-darkman-medium`, cached from a pinned Piper checkpoint dataset revision.
-- **Full training from scratch** omits `--ckpt_path`. It can optionally use `--model.vocoder_warmstart_ckpt`; that warm-start is recorded separately from the training mode. Around one hour of speech may be insufficient for a high-quality voice, but the experiment is not blocked.
-
-The recommended starting caps are **1000 epochs for fine-tuning** and **2000 for training from scratch**. Fine-tuning also offers 250 and 500 epoch experiments; scratch training offers a 500 epoch experiment. These are starting points, not universal quality optima. Automatic early stopping is disabled. Compare the same held-out listening sentences from interval checkpoints before deciding which voice sounds best.
-
-## Automatic training settings and estimates
-
-Batch size defaults to **Auto**. On CUDA, a separate short Piper training process tries progressively larger batches using real dataset samples and forward/backward work. Each trial records its outcome and peak VRAM. The chosen batch must leave configurable memory headroom; an out-of-memory trial cannot damage the subsequent training process. The run stays on one GPU. On CPU, Auto uses available RAM, the longest utterance, and dataset size to choose a conservative batch of 4, 8, or 16. You can manually choose a batch size in Advanced settings.
-
-DataLoader workers and PyTorch CPU threads also default to **Auto**. The worker heuristic reserves CPU capacity for the trainer and operating system; CPU training gets fewer workers because its model computation already uses CPU cores. Actual resolved worker, thread, and batch settings are saved in `run-config.json`, along with the command, batch probe results, hardware information, and the effective learning-rate schedule. Advanced settings allow manual overrides. Docker Desktop may impose CPU and RAM VM limits; Compose does not set an artificial CPU limit.
-
-The training panel shows current epoch, global optimizer step, estimated total optimizer steps, batches per epoch, throughput, elapsed time, and an **estimated** finish time. ETA appears after five warm-up batches and at least ten measured batches, then uses recent batch times. Validation, checkpoint writing, and changing input lengths can shift the finish time. An optional GPU hourly rate estimates compute cost only; storage and provider fees are excluded.
-
-Each run saves CPU/RAM and GPU samples every five seconds in `hardware-metrics.jsonl`. GPU compute utilization, GPU memory utilization, and allocated VRAM are separate measurements. Low VRAM allocation alone is not a performance fault; training throughput is the goal. The diagnostics section reports the trainer's PyTorch/CUDA versions, visible GPU, available CPU cores, RAM, and automatic defaults. Possible bottlenecks are hints, not certain diagnoses.
-
-The pinned Piper revision has fixed per-epoch generator/discriminator learning-rate decays of `0.999875`/`0.9999` by default. Changing `max_epochs` changes the **final learning-rate ratio**, but does not recalculate the per-epoch decay. A checkpoint can carry different initial rates or decays; each run records the effective model values after loading it. Therefore a 250-epoch run is not equivalent to the final result of a 1000-epoch run. For controlled 30-minute versus 60-minute comparisons, use the same base checkpoint, model configuration, seed, epoch cap, learning-rate policy, and listening sentences. The 60-minute dataset naturally has more batches and optimizer steps per epoch.
-
-Training keeps a rolling latest checkpoint every 25 epochs, interval checkpoints every 250 epochs, and a final checkpoint. The Voice step can export any saved checkpoint for listening comparison. Avoiding a checkpoint every epoch limits disk use and pause time.
-
-Every run stores `run-config.json`, the actual command, status, `train.log`, and CSV loss metrics in the project's persistent run directory. Training runs as a separate process, so closing the browser or losing its connection does not stop it. Reopen the project to see saved progress. Stopping the trainer container interrupts the process. The command uses Piper `v1.3.0`, PyTorch `2.6.0`, and pinned training dependency constraints with Python Lightning CPU/GPU accelerator selection. Runs do not send recordings or model files to a remote service.
-
-## Optional OpenAI-compatible Piper API
-
-Export an ONNX pair and click **Publish to Piper API shared directory**. Then start the optional service:
-
-```bash
-docker compose --profile inference up -d
-```
-
-The pinned `kamilkrawiec/piper-openai-tts:v1.0.2` container mounts `./data/piper-voices` at `/data` and listens on <http://localhost:5000>. If host port 5000 is already in use, set `PIPER_API_HOST_PORT=5001` in `.env`; the container still listens on port 5000. Test with:
+It reads voices from `./data/piper-voices` and listens on <http://localhost:5000>. Set `PIPER_API_HOST_PORT` in `.env` if you need a different host port. Replace the voice name below with your exported voice name:
 
 ```bash
 curl -o output.wav \
@@ -109,7 +140,7 @@ curl -o output.wav \
   http://localhost:5000/v1/audio/speech
 ```
 
-The service may download a requested official voice on first use. A published custom voice is loaded from the shared `/data` folder.
+The API may download a requested official voice on first use. The trainer images do not start this API automatically.
 
 ## Persistent data
 
@@ -133,42 +164,6 @@ data/
 ```
 
 Back up this directory to retain projects, recordings, bundles, logs, checkpoints, and models. Deleting a project or the `data` directory removes its stored voice data. Uploaded text, audio, checkpoint, dataset, and model files stay local by default.
-
-## Prompt handling and sample checks
-
-Sentence splitting is deterministic and handles common Polish abbreviations and decimal/version numbers without paraphrasing. Line mode makes every non-empty line one prompt. The prompt text is the dataset label; no ASR is used. Prompt length and audio quality checks are recommendations for review, not automatic deletion rules.
-
-The recording UI estimates duration from word count at 140 words per minute. It is not a promise about accepted dataset duration. Dataset target selection uses actual normalized audio lengths.
-
-## Limitations
-
-- This is a single-speaker v1 workflow at Piper medium configuration and 22,050 Hz. Piper applies its seeded internal validation split to the training-only metadata; the fixed validation and test samples remain available for external listening and model-to-model comparison.
-- Browser recording requires microphone permission and a secure browser context (localhost is treated as secure by modern browsers).
-- Training quality depends on recording conditions, transcription fidelity, dataset size, and checkpoint compatibility. The measured training ETA is approximate and becomes available only after warm-up batches.
-- The manager allows one active training job per project. A completed run can be exported from its saved checkpoint. If the container stops during training, status is recovered from the persisted process record and logs; interrupted jobs may need to be restarted from a suitable checkpoint.
-- The UI is designed for local use. Do not expose port 7860 publicly without adding authentication and a protected reverse proxy.
-
-## Development checks
-
-Core logic tests use Python's standard library:
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-Docker configuration can be inspected with:
-
-```bash
-docker compose config
-docker compose -f compose.yml -f compose.gpu.yml config
-docker compose --profile inference config
-```
-
-UI callback tests also run when Gradio is installed (they are skipped by the core-only command). Use the app's Python environment to include them:
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-```
 
 ## Licensing
 

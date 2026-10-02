@@ -1,6 +1,7 @@
 """UI callback contracts; run with the app's Gradio environment."""
 
 import asyncio
+import json
 import importlib.util
 import math
 import os
@@ -98,6 +99,11 @@ class GuidedUITests(unittest.TestCase):
         self.assertEqual([tab["props"]["interactive"] for tab in tabs], [True, False, False, False, False, False])
         selected = next(component for component in app.config["components"] if component["type"] == "tabs")
         self.assertEqual(selected["props"]["selected"], 1)
+        timer_ids = {item["id"] for item in app.config["components"] if item["type"] == "timer"}
+        picker_ids = {item["id"] for item in app.config["components"] if item["props"].get("label") in {"Trained voice run", "Saved checkpoint"}}
+        for event in app.config["dependencies"]:
+            if any(target[0] in timer_ids for target in event["targets"]):
+                self.assertTrue(picker_ids.isdisjoint(event["outputs"]))
 
     def test_forward_navigation_returns_inline_help_when_not_ready(self):
         update, message = self.ui.navigate_step(None, 1, 2)
@@ -155,3 +161,55 @@ class GuidedUITests(unittest.TestCase):
         self.assertTrue(chart["visible"])
         self.assertEqual(len(chart["value"]), 2)
         self.assertIn("latest log", logs)
+
+    def test_voice_runs_only_include_saved_training_checkpoints(self):
+        project = self.store.create_project("Narrator")
+        root = self.store.project_dir(project["id"]) / "runs"
+        for run_id in ("trained", "failed"):
+            run = root / run_id
+            run.mkdir(parents=True)
+            (run / "run-config.json").write_text(json.dumps({"voice_name": "Narrator", "training_mode": "finetune", "max_epochs": 100}))
+        checkpoint = root / "trained" / "metrics/version_0/checkpoints/epoch=99-step=200.ckpt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"trained")
+        probe = root / "failed" / "probe/8/checkpoints/test.ckpt"
+        probe.parent.mkdir(parents=True)
+        probe.write_bytes(b"probe")
+        choices = self.ui.run_choices(project["id"])
+        self.assertEqual([value for _, value in choices], ["trained"])
+        self.assertIn("Narrator", choices[0][0])
+        self.assertIn("100", choices[0][0])
+        self.assertIn("After epoch 100", self.ui.checkpoint_choices(project["id"], "trained")[0][0])
+
+    def test_refresh_preserves_selected_run_and_checkpoint(self):
+        project = self.store.create_project("Narrator")
+        for run_id in ("older", "newer"):
+            run = self.store.project_dir(project["id"]) / "runs" / run_id
+            (run / "checkpoints").mkdir(parents=True)
+            (run / "run-config.json").write_text('{}')
+            (run / "checkpoints/final.ckpt").write_bytes(b"trained")
+        checkpoint = str(self.store.project_dir(project["id"]) / "runs/older/checkpoints/final.ckpt")
+        with patch.object(self.ui, "training_view", return_value=("summary", {}, "logs")):
+            result = self.ui.refresh_runs(project["id"], "older", checkpoint)
+        self.assertEqual(result[1]["value"], "older")
+        self.assertEqual(result[4]["value"], checkpoint)
+        self.assertTrue(result[5]["interactive"])
+
+    def test_export_defaults_to_latest_checkpoint_even_when_named_last(self):
+        project = self.store.create_project("Narrator")
+        run = self.store.project_dir(project["id"]) / "runs/trained"
+        (run / "checkpoints/latest").mkdir(parents=True)
+        older = run / "checkpoints/epoch-0000.ckpt"
+        latest = run / "checkpoints/latest/last.ckpt"
+        older.write_bytes(b"older")
+        latest.write_bytes(b"latest")
+        os.utime(older, (1, 1)); os.utime(latest, (2, 2))
+        def export(checkpoint, config, output, name):
+            self.assertEqual(checkpoint, latest)
+            output.mkdir(parents=True)
+            model = output / (name + '.onnx'); model.write_bytes(b'model')
+            config = output / (name + '.onnx.json'); config.write_text('{}')
+            return model, config
+        with patch.object(self.ui, "export_onnx", side_effect=export):
+            archive, message, _ = self.ui.export_run(project["id"], "trained", "Narrator")
+        self.assertIsNotNone(archive, message)
