@@ -22,7 +22,9 @@ class WorkflowProgressTests(unittest.TestCase):
 
     def test_imported_dataset_unlocks_training_without_prompts(self):
         progress = WorkflowProgress(project=True, datasets=1)
+        self.assertIsNone(progress.blocked_reason(3))
         self.assertIsNone(progress.blocked_reason(5))
+        self.assertIsNone(progress.blocked_reason(6))
         self.assertEqual(progress.next_step, 5)
 
     def test_run_or_exported_model_unlocks_voice_step(self):
