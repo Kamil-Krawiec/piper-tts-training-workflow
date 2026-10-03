@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import csv
+import math
 import os
 import shlex
 import signal
@@ -39,6 +40,13 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
     mode = config.get("training_mode")
     if mode not in {"finetune", "scratch"}:
         raise ValueError("training_mode must be 'finetune' or 'scratch'")
+    interval = config.get("checkpoint_interval", 250)
+    if not 1 <= float(interval) <= 100_000 or float(interval) != int(interval):
+        raise ValueError("Checkpoint interval must be a whole number between 1 and 100000")
+    rates = {"learning_rate": float(config.get("learning_rate", 0.0002)),
+             "learning_rate_d": float(config.get("learning_rate_d", 0.0001))}
+    if any(not math.isfinite(rate) or not 0 < rate <= 1 for rate in rates.values()):
+        raise ValueError("Learning rates must be finite numbers greater than 0 and at most 1")
     run_dir = Path(config.get("run_dir", Path(config["config_path"]).parent))
     csv_logger = {
         "class_path": "lightning.pytorch.loggers.CSVLogger",
@@ -50,6 +58,8 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         "--data.csv_path", str(config["csv_path"]),
         "--data.audio_dir", str(config["audio_dir"]),
         "--model.sample_rate", str(int(config["sample_rate"])),
+        "--model.learning_rate", str(rates["learning_rate"]),
+        "--model.learning_rate_d", str(rates["learning_rate_d"]),
         "--data.espeak_voice", str(config["espeak_voice"]),
         "--data.cache_dir", str(config["cache_dir"]),
         "--data.config_path", str(config["config_path"]),
@@ -73,18 +83,23 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
                         "--trainer.limit_val_batches", "0", "--trainer.num_sanity_val_steps", "0",
                         "--trainer.enable_checkpointing", "false", "--trainer.callbacks", json.dumps(callbacks)))
     else:
-        callbacks = [{"class_path": "app.training_metrics.TrainingMetrics", "init_args": {
+        callbacks = [{"class_path": "app.training_metrics.LearningRateSchedule"},
+                     {"class_path": "app.training_metrics.TrainingMetrics", "init_args": {
             "path": str(run_dir / "training-metrics.json"),
             "steps_per_epoch": int(config.get("steps_per_epoch", 0)),
             "max_epochs": int(config.get("max_epochs", epoch_cap_for(mode))),
             "hourly_rate": config.get("gpu_hourly_rate")}}]
         callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
             "dirpath": str(run_dir / "checkpoints"), "filename": "epoch-{epoch:04d}",
-            "auto_insert_metric_name": False, "every_n_epochs": int(config.get("checkpoint_interval", 250)),
+            "auto_insert_metric_name": False, "every_n_epochs": int(interval),
             "save_top_k": -1, "save_last": False}})
         callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
             "dirpath": str(run_dir / "checkpoints" / "latest"), "filename": "rolling",
             "every_n_epochs": 25, "save_top_k": 0, "save_last": True}})
+        callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
+            "dirpath": str(run_dir / "checkpoints" / "best"), "filename": "best-epoch-{epoch:04d}",
+            "auto_insert_metric_name": False, "monitor": "val_loss", "mode": "min", "save_top_k": 1,
+            "save_on_train_epoch_end": True}})
         command.extend(("--trainer.callbacks", json.dumps(callbacks)))
     if config["device"] not in {"cpu", "cuda"}:
         raise ValueError("device must be cpu or cuda")

@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import time
 import uuid
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from app.audio import inspect_wav, normalize_audio, trim_edge_silence
 from app.bundles import export_bundle, import_bundle
 from app.checkpoints import download_checkpoint
 from app.datasets import create_dataset
-from app.export import export_onnx, package_model, publish_model, validate_voice_name
+from app.export import export_onnx, package_model, publish_model, snapshot_checkpoint, validate_voice_name
 from app.inference import synthesize
 from app.projects import ProjectStore
 from app.text import estimate_text, parse_prompts, prompt_recommendation
@@ -92,7 +93,7 @@ def evaluation_choices(project_id: str, dataset_name: str):
     if not index_path.is_file():
         return []
     rows = json.loads(index_path.read_text(encoding="utf-8"))
-    return [(f"{row['sample_id']}: {row['text'][:90]}", row["sample_id"]) for row in rows if row.get("split") == "test"]
+    return [(row["text"][:110], row["sample_id"]) for row in rows if row.get("split") == "test"]
 
 
 def load_evaluation_prompt(project_id: str, dataset_name: str, sample_id: str):
@@ -127,6 +128,7 @@ def _project_summary(project_id: str | None) -> str:
     samples = [sample for sample in STORE.list_samples(project_id) if sample["status"] != "superseded"]
     recorded = len({sample["prompt_id"] for sample in samples})
     accepted_count = counts.get("accepted", {}).get("count", 0)
+    imported = imported_audio_metrics(project_id)
     rejected_count = counts.get("rejected", {}).get("count", 0)
     review_count = counts.get("review", {}).get("count", 0)
     needs_attention = []
@@ -137,10 +139,35 @@ def _project_summary(project_id: str | None) -> str:
     details = " · ".join(needs_attention)
     return (
         f"**Project: {project['name']}** · {project['language']}  \n"
-        f"**{recorded}/{prompt_total}** prompts recorded · **{accepted_count}** accepted · "
+        + (f"**{accepted_count + imported['count']}** available recordings · "
+           f"**{_duration_label(accepted + imported['seconds'])}** available audio  \n" if imported["count"] else "")
+        + f"Local recordings: **{recorded}/{prompt_total}** prompts recorded · **{accepted_count}** accepted · "
         f"**{_duration_label(accepted)}** accepted audio"
         + (f" · {details}" if details else "")
+        + (f"  \n**{imported['count']}** imported recording{'s' if imported['count'] != 1 else ''} · "
+           f"**{_duration_label(imported['seconds'])}** imported audio" if imported["count"] else "")
     )
+
+
+def imported_audio_metrics(project_id: str) -> dict[str, float]:
+    """Count each imported sample once, excluding recordings already in this project."""
+    seen = {sample["id"] for sample in STORE.list_samples(project_id) if sample["status"] == "accepted"}
+    count, seconds = 0, 0.0
+    for dataset in _dataset_dirs(project_id):
+        if not dataset.name.startswith("imported-"):
+            continue
+        index = json.loads((dataset / "sample-index.json").read_text(encoding="utf-8"))
+        for row in index:
+            if row["sample_id"] in seen:
+                continue
+            audio_path = (dataset / "audio" / row["filename"]).resolve()
+            if not audio_path.is_relative_to((dataset / "audio").resolve()):
+                raise ValueError("Imported recording path escapes its dataset")
+            with wave.open(str(audio_path), "rb") as audio:
+                seconds += audio.getnframes() / audio.getframerate()
+            count += 1
+            seen.add(row["sample_id"])
+    return {"count": count, "seconds": seconds}
 
 
 def _clock(seconds: float) -> str:
@@ -421,7 +448,9 @@ def import_dataset_ui(project_id: str, archive_path: str | None):
         if not archive_path:
             raise ValueError("Select a dataset ZIP")
         target = STORE.project_dir(project_id) / "datasets" / f"imported-{uuid.uuid4().hex[:8]}"
-        import_bundle(archive_path, target)
+        with tempfile.TemporaryDirectory(prefix=".import-", dir=target.parent) as temporary:
+            staged = import_bundle(archive_path, Path(temporary) / "dataset")
+            staged.rename(target)
         choices = _dataset_choices(project_id)
         update = gr.update(choices=choices, value=target.name)
         return update, update, "Dataset bundle validated and imported."
@@ -487,7 +516,8 @@ def _training_options(device: str, batch: Any, custom_batch: Any, workers: Any, 
 
 
 def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: Any, seed: int, max_epochs: int,
-                   custom_batch: Any = None, workers: Any = "Auto", custom_workers: Any = None, threads: Any = "Auto", hourly_rate: Any = None):
+                   custom_batch: Any = None, workers: Any = "Auto", custom_workers: Any = None, threads: Any = "Auto", hourly_rate: Any = None,
+                   checkpoint_interval: Any = 250, learning_rate: Any = 0.0002, learning_rate_d: Any = 0.0001):
     try:
         dataset = _selected_dataset(project_id, dataset_name)
         selected_device = device
@@ -517,6 +547,7 @@ def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_pat
             "vocoder_warmstart_checkpoint": warmstart_path or None, "device": selected_device,
             **_training_options(selected_device, batch_size, custom_batch, workers, custom_workers, threads, hourly_rate),
             "seed": int(seed), "max_epochs": int(max_epochs),
+            "checkpoint_interval": checkpoint_interval, "learning_rate": learning_rate, "learning_rate_d": learning_rate_d,
             "validation_split": 0.1, "num_test_examples": 5,
             "piper_revision": "fee9b9cefae4ebf9e196cfe994dea418f051506c",
             "base_checkpoint_hash": _hash_if_exists(Path(checkpoint_path)) if mode == "finetune" and checkpoint_path else None,
@@ -629,9 +660,11 @@ def training_view(project_id: str | None):
                f"{gpu.get('sm_clock_mhz', '—')} / {gpu.get('memory_clock_mhz', '—')} MHz")
     schedule = config.get("effective_lr_schedule") or {}
     if schedule:
-        details += (f" · initial generator/discriminator LR: {schedule['generator_initial_lr']} / {schedule['discriminator_initial_lr']}"
+        details += (f" · configured initial generator/discriminator LR: {schedule['generator_initial_lr']} / {schedule['discriminator_initial_lr']}"
                     f" · per-epoch decay: {schedule['generator_per_epoch_decay']} / {schedule['discriminator_per_epoch_decay']}"
-                    f" · final LR ratio: {schedule['generator_final_ratio']:.3f} / {schedule['discriminator_final_ratio']:.3f}")
+                    f" · planned final LR ratio: {schedule['generator_final_ratio']:.3f} / {schedule['discriminator_final_ratio']:.3f}")
+    if performance.get("learning_rates"):
+        details += f" · current optimizer LR (generator/discriminator): {' / '.join(str(rate) for rate in performance['learning_rates'])}"
     summary = (
         f'<div class="train-summary"><div class="train-summary-head"><strong>{phase}</strong>'
         f'<span>Run {run_label}</span></div><p>{epoch_label} · {percentage}% of epochs completed</p>'
@@ -698,8 +731,9 @@ def checkpoint_choices(project_id: str, run_id: str | None) -> list[tuple[str, s
             checkpoints.extend(path for path in directory.rglob("*.ckpt") if path.is_file() and path.stat().st_size)
     choices = []
     for path in sorted(checkpoints, key=lambda item: item.stat().st_mtime, reverse=True):
-        epoch = re.search(r"^epoch[-=](\d+)", path.stem)
-        label = f"After epoch {int(epoch[1]) + 1}" if epoch else "Final trained checkpoint" if path.stem == "final" else "Latest saved training checkpoint" if path.stem == "last" else path.stem
+        epoch = re.search(r"^(?:best-)?epoch[-=](\d+)", path.stem)
+        saved = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).strftime("%d %b %H:%M UTC")
+        label = f"{'Best validation · ' if path.stem.startswith('best-') else ''}After epoch {int(epoch[1]) + 1}" if epoch else "Final trained checkpoint" if path.stem == "final" else f"Latest saved training checkpoint · {saved}" if path.stem == "last" else path.stem
         choices.append((f"{label} · {path.stat().st_size / 1024**2:.0f} MiB", str(path)))
     return choices
 
@@ -710,6 +744,27 @@ def refresh_checkpoints(project_id: str, run_id: str | None, checkpoint_path: st
     return gr.update(choices=choices, value=selected, interactive=bool(choices)), gr.update(interactive=bool(choices))
 
 
+def _selected_checkpoint(project_id: str, run_id: str, checkpoint_path: str | None = None) -> Path:
+    checkpoints = [Path(value) for _, value in checkpoint_choices(project_id, run_id)]
+    if not checkpoints:
+        raise ValueError("No training checkpoint is available in this run yet")
+    chosen = Path(checkpoint_path).resolve() if checkpoint_path else checkpoints[0].resolve()
+    if chosen not in {path.resolve() for path in checkpoints}:
+        raise ValueError("Selected checkpoint does not belong to this run")
+    return chosen
+
+
+def download_run_checkpoint(project_id: str, run_id: str, checkpoint_path: str | None):
+    try:
+        chosen = _selected_checkpoint(project_id, run_id, checkpoint_path)
+        target = DATA_DIR / "exports" / f"{Path(run_id).name}-{chosen.stem}-{uuid.uuid4().hex[:8]}.ckpt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_checkpoint(chosen, target)
+        return str(target), "Saved a checkpoint copy for further training. ONNX voices cannot be used as training checkpoints."
+    except Exception as error:
+        return None, f"Checkpoint download failed: {error}"
+
+
 def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None = None):
     try:
         if not run_id:
@@ -717,23 +772,23 @@ def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: s
         run_dir = STORE.project_dir(project_id) / "runs" / Path(run_id).name
         if not run_dir.is_dir():
             raise ValueError("Select a training run")
-        checkpoints = [Path(value) for _, value in checkpoint_choices(project_id, run_id)]
-        if not checkpoints:
-            raise ValueError("No training checkpoint is available in this run yet")
-        if checkpoint_path:
-            chosen = Path(checkpoint_path).resolve()
-            if chosen not in {path.resolve() for path in checkpoints}:
-                raise ValueError("Selected checkpoint does not belong to this run")
-        else:
-            chosen = checkpoints[0]
+        chosen = _selected_checkpoint(project_id, run_id, checkpoint_path)
         config = run_dir / "voice.onnx.json"
-        export_name = voice_name
-        epoch = re.search(r"^epoch[-=](\d+)", chosen.stem)
+        validate_voice_name(voice_name)
+        export_name = voice_name[:40] + f"-{run_id[:8]}"
+        epoch = re.search(r"^(?:best-)?epoch[-=](\d+)", chosen.stem)
         if checkpoint_path and epoch:
             export_name += f"-epoch-{int(epoch[1]) + 1}"
+        else:
+            export_name += f"-{chosen.stem}"
+        export_name += f"-{uuid.uuid4().hex[:8]}"
         export_name = validate_voice_name(export_name)
         output = STORE.project_dir(project_id) / "models" / export_name
-        model, config_file = export_onnx(chosen, config, output, export_name)
+        # Export a snapshot so the rolling checkpoint can advance during training.
+        with tempfile.TemporaryDirectory(prefix="piper-checkpoint-") as temporary:
+            snapshot = Path(temporary) / chosen.name
+            snapshot_checkpoint(chosen, snapshot)
+            model, config_file = export_onnx(snapshot, config, output, export_name)
         archive = DATA_DIR / "exports" / f"{export_name}.piper-model.zip"
         archive.parent.mkdir(parents=True, exist_ok=True)
         package_model(model, config_file, archive)
@@ -758,12 +813,51 @@ def model_choices(project_id: str):
 
 def synthesize_model(model_path: str, text: str):
     try:
+        if not model_path:
+            raise ValueError("Select a saved voice or generate a checkpoint sample first")
         model = Path(model_path)
+        (DATA_DIR / "exports").mkdir(parents=True, exist_ok=True)
         output = DATA_DIR / "exports" / f"test-{uuid.uuid4().hex}.wav"
         config = model.with_name(model.name + ".json")
         return str(synthesize(model, config, text, output)), "Speech generated locally."
     except Exception as error:
         return None, f"Synthesis failed: {error}"
+
+
+def generate_checkpoint_sample(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None, text: str):
+    """One user action exports exactly the selected checkpoint and speaks the test text."""
+    if not text or not text.strip():
+        return None, "Enter text for your listening test.", None, gr.update(value=None)
+    label = next((label for label, path in checkpoint_choices(project_id, run_id) if path == checkpoint_path), "Latest checkpoint")
+    archive, message, model_update = export_run(project_id, run_id, voice_name, checkpoint_path)
+    if not archive:
+        return None, message, None, gr.update(value=None)
+    audio, speech_message = synthesize_model(model_update["value"], text)
+    status = f"Run **{run_id[:8]}** · **{label}**. {speech_message}"
+    return audio, status, archive, model_update
+
+
+def run_dataset(project_id: str, run_id: str | None) -> str | None:
+    if not STORE.has_project(project_id) or not run_id:
+        return None
+    path = STORE.project_dir(project_id) / "runs" / Path(run_id).name / "run-config.json"
+    config = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    dataset = config.get("dataset_id")
+    return Path(dataset).name if dataset else None
+
+
+def run_evaluation_choices(project_id: str, run_id: str | None):
+    return evaluation_choices(project_id, run_dataset(project_id, run_id))
+
+
+def refresh_run_reference(project_id: str, run_id: str | None, sample_id: str | None = None):
+    choices = run_evaluation_choices(project_id, run_id)
+    selected = sample_id if sample_id in {value for _, value in choices} else None
+    return gr.update(choices=choices, value=selected, interactive=bool(choices))
+
+
+def load_run_evaluation_prompt(project_id: str, run_id: str, sample_id: str):
+    return load_evaluation_prompt(project_id, run_dataset(project_id, run_id), sample_id)
 
 
 def compare_models(model_a: str, model_b: str, text: str):
@@ -790,7 +884,8 @@ def publish_selected(model_path: str):
 
 
 def prepare_training_summary(project_id: str, dataset_name: str, mode: str, checkpoint_path: str, warmstart_path: str, device: str, batch_size: Any, seed: int, max_epochs: int,
-                             custom_batch: Any = None, workers: Any = "Auto", custom_workers: Any = None, threads: Any = "Auto", hourly_rate: Any = None):
+                             custom_batch: Any = None, workers: Any = "Auto", custom_workers: Any = None, threads: Any = "Auto", hourly_rate: Any = None,
+                             checkpoint_interval: Any = 250, learning_rate: Any = 0.0002, learning_rate_d: Any = 0.0001):
     try:
         dataset = _selected_dataset(project_id, dataset_name)
         manifest = json.loads((dataset / "dataset.json").read_text(encoding="utf-8")) if (dataset / "dataset.json").exists() else {}
@@ -824,6 +919,8 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
             f"Sample rate: **22050 Hz** · eSpeak: **{project['espeak_voice']}** · Device: **{selected_device.upper()}** · Batch size: **{actual_batch}** · "
             f"DataLoader workers: **{workers}**\n\n"
             f"Maximum epochs: **{int(max_epochs)}** · Seed: **{int(seed)}** · Piper internal validation: **10% / 5 test examples**\n\n"
+            f"Keep checkpoint every **{checkpoint_interval} epochs**, plus rolling, best-validation and final checkpoints.\n\n"
+            f"Generator / discriminator learning rates: **{learning_rate} / {learning_rate_d}**, stepped after each epoch and logged.\n\n"
             f"**Training time estimate:** available after warm-up and at least 10 measured training batches. "
             f"The {int(max_epochs)}-epoch cap is a starting point, not a quality guarantee. "
             f"Piper's fixed per-epoch learning-rate decay gives a different final ratio when this cap changes.",
@@ -886,6 +983,24 @@ def refresh_runs(project_id: str | None, run_id: str | None = None, checkpoint_p
         chart,
         *refresh_checkpoints(project_id, selected, checkpoint_path),
     )
+
+
+def checkpoint_help(project_id: str | None, run_id: str | None):
+    if not checkpoint_choices(project_id, run_id):
+        return "No saved checkpoint yet. Keep training; the first rolling checkpoint is normally saved after 25 epochs."
+    return "Choose a checkpoint, enter text, and generate a sample. Training can continue. Each sample keeps its own voice download."
+
+
+def poll_training(project_id: str | None, run_id: str | None, checkpoint_path: str | None, previous):
+    updates = list(refresh_runs(project_id, run_id, checkpoint_path))
+    signature = [project_id, updates[1].get("choices"), updates[4].get("choices")]
+    if previous and signature[0] == previous[0]:
+        # Refresh each picker independently, leaving unchanged controls undisturbed.
+        if signature[1] == previous[1]:
+            updates[1] = gr.update()
+        if signature[2] == previous[2]:
+            updates[4] = updates[5] = gr.update()
+    return *updates, signature
 
 
 def build_app() -> gr.Blocks:
@@ -1034,8 +1149,12 @@ def build_app() -> gr.Blocks:
                     gpu_hourly_rate = gr.Textbox(value="", label="GPU cost per hour in USD (optional)", placeholder="e.g. 0.34",
                                                  info="Compute time only; storage and provider fees are excluded.")
                     max_epochs = gr.Number(value=1000, precision=0, minimum=1, maximum=100000, label="Maximum epochs")
+                    checkpoint_interval = gr.Number(value=250, precision=0, minimum=1, maximum=100000, label="Save checkpoint every X epochs",
+                                                    info="Keeps each milestone. Checkpoints can use hundreds of MB each; choose an interval that fits your storage.")
+                    learning_rate = gr.Number(value=0.0002, precision=8, minimum=0.00000001, maximum=1, label="Generator learning rate")
+                    learning_rate_d = gr.Number(value=0.0001, precision=8, minimum=0.00000001, maximum=1, label="Discriminator learning rate")
                     training_seed = gr.Number(value=42, precision=0, minimum=0, label="Random seed")
-                    gr.Markdown("Piper uses fixed per-epoch learning-rate decay at this revision. Changing the epoch cap changes the final learning-rate ratio. Automatic early stopping is disabled.")
+                    gr.Markdown("Learning rates decay once per epoch; the actual rates are logged. The best validation checkpoint is retained separately. Listen to checkpoints to judge voice quality; automatic early stopping is disabled.")
                 gr.Markdown("### Review and start")
                 prepare_button = gr.Button("Review run summary")
                 run_summary = gr.Markdown()
@@ -1059,37 +1178,43 @@ def build_app() -> gr.Blocks:
                 forward_buttons.append((continue_train, 5, 6))
 
             with gr.Tab("6 · Voice", id=6, interactive=progress.blocked_reason(6) is None, elem_classes="step-page") as voice_tab:
-                step_heading(6, "Export and listen to your voice", "Export a saved training checkpoint as a Piper voice, test it locally, and download the model to use in your own applications.")
-                gr.Markdown("### 1. Export a trained voice\nSelect a run with a saved checkpoint. The download contains both the ONNX model and its JSON configuration.")
-                refresh_voice_button = gr.Button("Refresh trained voices")
-                run_select = gr.Dropdown(label="Trained voice run", value=None, choices=[], interactive=False, filterable=False)
-                checkpoint_select = gr.Dropdown(label="Saved checkpoint", value=None, interactive=False, filterable=False, info="Only saved training checkpoints are shown. The newest is selected automatically.")
-                model_name = gr.Textbox(label="Voice filename", value="pl_PL-kamil-medium", info="Use letters, numbers, underscores, and hyphens.")
-                export_model_button = gr.Button("Export voice & prepare download", variant="primary", interactive=False)
+                step_heading(6, "Listen to your training checkpoints", "Choose a saved checkpoint and hear how your voice is improving. Training can continue while you listen.")
+                with gr.Row():
+                    run_select = gr.Dropdown(label="Trained voice run", value=None, choices=[], interactive=False, filterable=False, scale=2)
+                    refresh_voice_button = gr.Button("Refresh checkpoints", scale=1)
+                checkpoint_select = gr.Dropdown(label="Saved checkpoint", value=None, interactive=False, filterable=False, info="The rolling checkpoint updates every 25 epochs. Milestones remain available.")
+                checkpoint_notice = gr.Markdown()
+                local_test_text = gr.Textbox(label="Text for your listening test", value="Dzisiaj sprawdzam własny model głosu.", lines=3, info="Use the same sentences across checkpoints for a fair comparison.")
+                export_model_button = gr.Button("Generate checkpoint sample", variant="primary", interactive=False)
                 model_status = gr.Markdown()
-                model_archive = gr.File(label="Download voice ZIP", interactive=False)
-                gr.Markdown("### 2. Listen to the exported voice")
-                model_select = gr.Dropdown(label="Exported voice", choices=[], value=None)
-                local_test_text = gr.Textbox(label="Text for your listening test", value="Dzisiaj sprawdzam własny model głosu.", lines=3)
-                synth_button = gr.Button("Generate test speech", variant="primary")
-                synth_audio = gr.Audio(label="Your generated voice", interactive=False)
-                with gr.Accordion("Compare with a recording or another voice", open=False):
-                    fixed_test_prompt = gr.Dropdown(label="Held-out test prompt from the Step 4 dataset", choices=[], value=None)
-                    load_fixed_prompt_button = gr.Button("Load test text & original recording")
+                synth_audio = gr.Audio(label="Checkpoint sample", interactive=False)
+                model_archive = gr.File(label="Download this voice (ONNX + JSON ZIP)", interactive=False)
+                with gr.Accordion("Download checkpoint for further training", open=False):
+                    gr.Markdown("Save the selected .ckpt file to fine-tune it later or move training to another machine. Keep your dataset ZIP too.")
+                    checkpoint_download_button = gr.Button("Prepare checkpoint download", interactive=False)
+                    checkpoint_download_status = gr.Markdown()
+                    checkpoint_download = gr.File(label="Training checkpoint (.ckpt)", interactive=False)
+                with gr.Accordion("Compare samples and original recordings", open=False):
+                    fixed_test_prompt = gr.Dropdown(label="Reference sentence from this run’s dataset", choices=[], value=None)
+                    load_fixed_prompt_button = gr.Button("Use reference sentence & recording", interactive=False)
                     reference_audio = gr.Audio(label="Original speaker recording", interactive=False)
-                    compare_model_select = gr.Dropdown(label="Second exported voice", choices=[], value=None)
-                    compare_button = gr.Button("Generate the same text with both voices")
+                    comparison_status = gr.Markdown()
+                    model_select = gr.Dropdown(label="First saved voice", choices=[], value=None, info="A generated checkpoint sample is selected here automatically.")
+                    synth_button = gr.Button("Listen to first saved voice", interactive=False)
+                    compare_model_select = gr.Dropdown(label="Second saved voice", choices=[], value=None)
+                    compare_button = gr.Button("Compare both voices using the test text", interactive=False)
                     compare_audio_a = gr.Audio(label="First voice", interactive=False)
                     compare_audio_b = gr.Audio(label="Second voice", interactive=False)
-                with gr.Accordion("Use your voice through the optional Piper API", open=False):
-                    gr.Markdown("Publish the selected voice, then start the API with `docker compose --profile inference up -d`.")
-                    publish_button = gr.Button("Publish selected voice to Piper API")
+                with gr.Accordion("Advanced: filenames and API publishing", open=False):
+                    model_name = gr.Textbox(label="Voice name prefix", value="pl_PL-kamil-medium", info="Each export adds a run/checkpoint identifier and a unique suffix.")
+                    gr.Markdown("Publish a generated or saved voice to your configured Piper API.")
+                    publish_button = gr.Button("Publish first saved voice to Piper API", interactive=False)
                     publish_status = gr.Markdown()
-                gr.Markdown("**Keep improving your voice:** Return to Step 3 to record more, then build a new dataset and train another run. Your earlier runs stay saved.")
                 with gr.Row(elem_classes="step-footer"):
                     back_voice = gr.Button("← Step 5 · Train")
                     record_more = gr.Button("Return to Step 3 · Record more")
                 back_buttons.extend([(back_voice, 5), (record_more, 3)])
+        poll_signature = gr.State(None)
         step_tabs = [project_tab, text_tab, record_tab, dataset_tab, train_tab, voice_tab]
 
         create_button.click(create_project, [project_name, language, espeak], [project_select, project_status, create_status, project_create_panel])
@@ -1098,8 +1223,8 @@ def build_app() -> gr.Blocks:
             queue_action_status, train_dataset, prompt_position, current_text,
             prompt_progress, active_prompt_id, run_select, model_select, compare_model_select,
         ]
-        stale_text = [estimate, queue_status, source_status, record_result, sample_review_status, dataset_status, dataset_transfer_status, run_summary, training_status, model_status, publish_status, workflow_status]
-        stale_files = [sample_player, sample_audio_player, dataset_archive, dataset_import_file, model_archive, synth_audio, reference_audio, compare_audio_a, compare_audio_b]
+        stale_text = [comparison_status, checkpoint_notice, estimate, queue_status, source_status, record_result, sample_review_status, dataset_status, dataset_transfer_status, run_summary, training_status, model_status, publish_status, workflow_status, checkpoint_download_status]
+        stale_files = [sample_player, sample_audio_player, dataset_archive, dataset_import_file, model_archive, synth_audio, reference_audio, compare_audio_a, compare_audio_b, checkpoint_download]
         project_select.change(select_project_state, project_select, project_state_outputs).then(
             reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status],
         ).then(
@@ -1127,7 +1252,7 @@ def build_app() -> gr.Blocks:
         duration_target.change(lambda target: gr.update(visible=(target == "Custom duration")), duration_target, custom_minutes_input)
         create_dataset_button.click(make_dataset, [project_select, duration_target, custom_minutes_input], [dataset_select, train_dataset, dataset_status, project_status]).then(step_availability, project_select, step_tabs)
         export_dataset_button.click(export_dataset_ui, [project_select, dataset_select], [dataset_archive, dataset_transfer_status])
-        import_dataset_button.click(import_dataset_ui, [project_select, dataset_import_file], [dataset_select, train_dataset, dataset_transfer_status]).then(step_availability, project_select, step_tabs)
+        import_dataset_button.click(import_dataset_ui, [project_select, dataset_import_file], [dataset_select, train_dataset, dataset_transfer_status]).then(_project_summary, project_select, project_status).then(step_availability, project_select, step_tabs)
         download_checkpoint_button.click(lambda: download_base_checkpoint("pl_PL-darkman-medium"), outputs=[base_checkpoint_path, training_status])
         checkpoint_upload_button.click(save_uploaded_checkpoint, checkpoint_upload, [base_checkpoint_path, training_status])
         training_mode.change(lambda mode: (gr.update(visible=(mode == "finetune")), gr.update(visible=(mode == "scratch")),
@@ -1142,26 +1267,40 @@ def build_app() -> gr.Blocks:
         workers.change(lambda choice: gr.update(visible=choice == "Custom"), workers, custom_workers)
         warmstart_checkbox.change(lambda enabled: gr.update(visible=True) if enabled else gr.update(visible=False, value=""), warmstart_checkbox, warmstart_path)
         training_inputs = [project_select, train_dataset, training_mode, base_checkpoint_path, warmstart_path, device,
-                           batch_size, training_seed, max_epochs, custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate]
+                           batch_size, training_seed, max_epochs, custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate,
+                           checkpoint_interval, learning_rate, learning_rate_d]
         prepare_button.click(prepare_training_summary, training_inputs, [run_summary, training_status])
         for setting in (train_dataset, training_mode, base_checkpoint_path, warmstart_path, device, batch_size,
-                        custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate, training_seed, max_epochs):
+                        custom_batch, workers, custom_workers, cpu_threads, gpu_hourly_rate, training_seed, max_epochs,
+                        checkpoint_interval, learning_rate, learning_rate_d):
             setting.change(lambda: "", outputs=run_summary)
         train_button.click(start_training, training_inputs, [training_status, run_status]).then(lambda: gr.update(open=True), outputs=training_progress_panel).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs)
         cancel_button.click(cancel_training, project_select, [training_status, run_status]).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
         refresh_run_button.click(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs)
-        gr.Timer(10).tick(refresh_training, project_select, [run_status, run_progress, run_chart])
+        gr.Timer(10).tick(poll_training, [project_select, run_select, checkpoint_select, poll_signature], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button, poll_signature], show_progress="hidden").then(step_availability, project_select, step_tabs, show_progress="hidden").then(checkpoint_help, [project_select, run_select], checkpoint_notice, show_progress="hidden")
         refresh_voice_button.click(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
-        voice_tab.select(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
+        voice_tab.select(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(checkpoint_help, [project_select, run_select], checkpoint_notice)
         run_select.input(refresh_checkpoints, [project_select, run_select], [checkpoint_select, export_model_button])
-        export_model_button.click(export_run, [project_select, run_select, model_name, checkpoint_select], [model_archive, model_status, model_select])
+        export_model_button.click(generate_checkpoint_sample, [project_select, run_select, model_name, checkpoint_select, local_test_text], [synth_audio, model_status, model_archive, model_select])
+        checkpoint_select.change(lambda checkpoint: gr.update(interactive=bool(checkpoint)), checkpoint_select, checkpoint_download_button)
+        checkpoint_download_button.click(download_run_checkpoint, [project_select, run_select, checkpoint_select], [checkpoint_download, checkpoint_download_status])
+        local_test_text.input(lambda: (None, ""), outputs=[synth_audio, model_status])
+        for picker in (run_select, checkpoint_select):
+            picker.input(lambda: (None, "", None), outputs=[synth_audio, model_status, model_archive])
+            picker.input(lambda: (None, ""), outputs=[checkpoint_download, checkpoint_download_status])
+        run_select.change(refresh_run_reference, [project_select, run_select], fixed_test_prompt)
+        run_select.input(lambda: None, outputs=reference_audio)
+        fixed_test_prompt.change(lambda sample: gr.update(interactive=bool(sample)), fixed_test_prompt, load_fixed_prompt_button)
         model_select.change(lambda pid: gr.update(choices=model_choices(pid)), project_select, compare_model_select)
-        synth_button.click(synthesize_model, [model_select, local_test_text], [synth_audio, model_status])
-        compare_button.click(compare_models, [model_select, compare_model_select, local_test_text], [compare_audio_a, compare_audio_b, model_status])
+        synth_button.click(synthesize_model, [model_select, local_test_text], [compare_audio_a, comparison_status])
+        model_select.change(lambda model: (gr.update(interactive=bool(model)), gr.update(interactive=bool(model))), model_select, [synth_button, publish_button])
+        for picker in (model_select, compare_model_select):
+            picker.change(lambda a, b: gr.update(interactive=bool(a and b)), [model_select, compare_model_select], compare_button)
+        compare_button.click(compare_models, [model_select, compare_model_select, local_test_text], [compare_audio_a, compare_audio_b, comparison_status])
         publish_button.click(publish_selected, model_select, publish_status)
-        dataset_select.change(lambda pid, dataset: (gr.update(choices=evaluation_choices(pid, dataset), value=None), gr.update(value=dataset)), [project_select, dataset_select], [fixed_test_prompt, train_dataset])
+        dataset_select.change(lambda dataset: gr.update(value=dataset), dataset_select, train_dataset)
         train_dataset.input(lambda dataset: gr.update(value=dataset), train_dataset, dataset_select)
-        load_fixed_prompt_button.click(load_evaluation_prompt, [project_select, dataset_select, fixed_test_prompt], [local_test_text, reference_audio, model_status])
+        load_fixed_prompt_button.click(load_run_evaluation_prompt, [project_select, run_select, fixed_test_prompt], [local_test_text, reference_audio, comparison_status]).then(lambda: (None, ""), outputs=[synth_audio, model_status])
         demo.load(load_app_state, project_select, [project_select, *project_state_outputs]).then(reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status]).then(refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(step_availability, project_select, step_tabs)
     return demo
 

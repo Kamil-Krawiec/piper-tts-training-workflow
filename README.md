@@ -91,7 +91,7 @@ Compose defaults to user/group `1000:1000`. If your Linux account uses different
 3. **Record:** Read one displayed prompt, record it with the microphone, listen, and accept it or save it for review. Accepted samples are normalized to mono 22,050 Hz PCM WAV without denoising or compression. Choose a saved recording to listen or change its status.
 4. **Dataset:** Build a 15-minute, 30-minute, 60-minute, custom-duration, or all-accepted dataset, or import a dataset ZIP. Dataset creation trims long leading and trailing silence from training copies, keeps about 0.25 seconds at each end of speech, and leaves the saved recordings unchanged. Duration targets use the trimmed copies. Export a ZIP here to move to a GPU host. Fixed validation and test recordings stay the same across target sizes. Piper trains from `train_metadata.csv`, which excludes those held-out recordings.
 5. **Train:** Choose fine-tuning or full training, supply a checkpoint if fine-tuning, choose your device, review the run summary, and start. The saved epoch bar and loss chart refresh while the page is open. Recent logs remain available under the chart.
-6. **Voice:** Export a saved checkpoint as an ONNX plus JSON pair, download the voice ZIP, and generate a local listening test. Listening comparisons and publishing to the optional Piper API are available in expandable sections.
+6. **Voice:** Select a run and checkpoint, enter test text, and click **Generate checkpoint sample**. The app exports that checkpoint automatically, plays its speech, and offers the ONNX plus JSON voice ZIP. Each sample keeps a separate export. Comparisons and API publishing are available in expandable sections.
 
 Each step reads from top to bottom and ends with Back/Continue navigation. Later steps unlock when their prerequisites are saved. **Resume saved progress** in Step 1 jumps to the next stage for an existing project. **Import a dataset ZIP** goes directly to Step 4 for the two-machine workflow. Switching projects clears temporary outputs from the previous workspace.
 
@@ -100,8 +100,8 @@ Each step reads from top to bottom and ends with Back/Continue navigation. Later
 1. Record and accept your samples in the local UI.
 2. Build a dataset in the Dataset step and download its ZIP.
 3. Start the CUDA image on the GPU machine and import the ZIP in the Dataset step.
-4. Select a checkpoint and training settings, then start training.
-5. Export a saved checkpoint in the Voice step and download the voice ZIP.
+4. Select a checkpoint and training settings, then start training. The project summary includes imported recordings and audio duration; importing the same recordings again does not count them twice.
+5. Generate a sample from a saved checkpoint in the Voice step and download its voice ZIP.
 
 You only need the dataset ZIP for this transfer; the original recording project can stay on your recording machine. Microphone recording on a remote host requires a secure browser connection. Keep the UI private; the commands above expose it only on the host's localhost interface.
 
@@ -115,11 +115,15 @@ Start with **Auto** batch size, DataLoader workers, and CPU threads. CUDA batch 
 
 The Train step shows epoch progress, loss curves, throughput, hardware use, and an estimated finish time. Loss curves appear after logged batches; runtime estimates need enough measured batches and can change during training. Reopening the UI restores saved progress.
 
-Training saves a rolling checkpoint every 25 epochs, interval checkpoints every 250 epochs, and a final checkpoint. Use the Voice step to export and compare saved checkpoints on the same listening sentences. Epoch caps are starting points; choose the final voice by listening to its output.
+In **Device and training settings**, set **Save checkpoint every X epochs** (default: 250). Each milestone is retained, so short intervals require more disk space. Training also saves a rolling checkpoint every 25 epochs, the lowest-validation-loss checkpoint, and a final checkpoint. Use the Voice step to compare checkpoints on the same listening sentences. Validation loss is a guide; choose your voice by listening.
+
+The generator and discriminator learning rates are configurable (defaults: `0.0002` and `0.0001`). Fine-tuning preserves the rates you select instead of inheriting them from the base checkpoint. Both rates decay once per completed epoch and the rates actually used appear as `lr_g` and `lr_d` in the run's metrics CSV. Current optimizer rates are available in training diagnostics. Lower rates are an experiment, not a guarantee of better voice quality.
 
 ## Use your exported voice
 
-The Voice step exports a checkpoint as an ONNX model plus a matching JSON configuration and packages them in a downloadable ZIP. Keep both files together when loading the voice into Piper. You can also generate listening tests directly in the UI.
+The Voice step exports the selected checkpoint automatically when generating a listening sample, then packages the ONNX model and matching JSON configuration in a downloadable ZIP. Keep both files together when loading the voice into Piper. Checkpoint choices refresh during training and your selection stays selected.
+
+To preserve training weights, open **Download checkpoint for further training** and prepare the selected `.ckpt` download. This makes a stable copy, including when you choose the rolling checkpoint. Keep the dataset ZIP as well. An ONNX voice is for speech generation and cannot be converted back into a full training checkpoint. Upload the `.ckpt` in Step 5 to start a new fine-tuning session from its weights; this does not resume the old epoch or optimizer state.
 
 ### Optional text-to-speech API
 

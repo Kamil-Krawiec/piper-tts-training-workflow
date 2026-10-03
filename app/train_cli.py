@@ -46,7 +46,8 @@ def main() -> None:
             hparams = {
                 name: value
                 for name, value in hparams.items()
-                if name in model_parameters or name == "_class_path"
+                if (name in model_parameters or name == "_class_path")
+                and name not in {"learning_rate", "learning_rate_d"}
             }
             if not hparams:
                 return
@@ -78,6 +79,7 @@ def main() -> None:
                 hparams = self.model.hparams
                 epochs = int(config["max_epochs"])
                 config["effective_lr_schedule"] = {
+                    "stepping": "explicit-per-epoch",
                     "generator_initial_lr": float(hparams.learning_rate),
                     "discriminator_initial_lr": float(hparams.learning_rate_d),
                     "generator_per_epoch_decay": float(hparams.lr_decay),

@@ -16,6 +16,17 @@ def validate_voice_name(name: str) -> str:
     return name
 
 
+def snapshot_checkpoint(source: Path, destination: Path) -> Path:
+    """Copy saved weights without serving a file the trainer may overwrite."""
+    before = source.stat()
+    shutil.copyfile(source, destination)
+    after = source.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        destination.unlink(missing_ok=True)
+        raise ValueError("Checkpoint changed while being copied. Please try again.")
+    return destination
+
+
 def export_onnx(checkpoint: Path, config_json: Path, output_dir: Path, voice_name: str) -> tuple[Path, Path]:
     name = validate_voice_name(voice_name)
     checkpoint = Path(checkpoint)
