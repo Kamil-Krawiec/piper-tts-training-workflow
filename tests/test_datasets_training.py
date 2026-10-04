@@ -90,7 +90,7 @@ class TrainingCommandTests(unittest.TestCase):
         intervals = [c["init_args"]["every_n_epochs"] for c in callbacks
                      if c["class_path"].endswith("ModelCheckpoint") and c["init_args"].get("save_top_k") == -1]
         self.assertEqual(intervals, [7])
-        self.assertTrue(any(c.get("init_args", {}).get("monitor") == "val_loss" for c in callbacks))
+        self.assertTrue(any(c.get("init_args", {}).get("monitor") == "val_mel" for c in callbacks))
         for field, invalid in [("checkpoint_interval", 0), ("checkpoint_interval", 2.5),
                                ("learning_rate", 0), ("learning_rate_d", float("nan"))]:
             with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):

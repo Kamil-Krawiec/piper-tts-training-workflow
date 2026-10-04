@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from importlib import metadata
 import math
 import os
 import re
@@ -102,7 +103,7 @@ def load_evaluation_prompt(project_id: str, dataset_name: str, sample_id: str):
         rows = json.loads((dataset / "sample-index.json").read_text(encoding="utf-8"))
         prompt = next(row["text"] for row in rows if row["sample_id"] == sample_id and row["split"] == "test")
         audio = dataset / "audio" / next(row["filename"] for row in rows if row["sample_id"] == sample_id)
-        return prompt, str(audio), "Loaded fixed held-out test prompt and reference recording. This sample is excluded from Piper's training metadata."
+        return prompt, str(audio), "Loaded fixed held-out test prompt and reference recording. This sample is excluded from the training split."
     except Exception as error:
         return "", None, f"Could not load test prompt: {error}"
 
@@ -549,7 +550,8 @@ def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_pat
             "seed": int(seed), "max_epochs": int(max_epochs),
             "checkpoint_interval": checkpoint_interval, "learning_rate": learning_rate, "learning_rate_d": learning_rate_d,
             "split_mode": "saved", "validation_split": 0.0, "num_test_examples": 0,
-            "piper_revision": "fee9b9cefae4ebf9e196cfe994dea418f051506c",
+            "piper_revision": os.environ.get("PIPER_REVISION", "unknown"),
+            "piper_version": piper_version(),
             "base_checkpoint_hash": _hash_if_exists(Path(checkpoint_path)) if mode == "finetune" and checkpoint_path else None,
         }
         errors = validate_training_config(config, cuda_available=has_cuda)
@@ -581,6 +583,13 @@ def _run_status_text(project_id: str):
     return f"Run: {status['run_id']} · Status: {status['status']}\n{status.get('log_tail','')}"
 
 
+def piper_version() -> str:
+    try:
+        return metadata.version("piper-tts")
+    except metadata.PackageNotFoundError:
+        return "unavailable"
+
+
 def hardware_diagnostics() -> dict[str, Any]:
     try:
         import torch
@@ -597,7 +606,8 @@ def hardware_diagnostics() -> dict[str, Any]:
             "GPU": gpu_snapshot(), "CPU model": model, "Physical CPU cores": physical_cpu_count(),
             "Logical CPU cores available": effective_cpu_count(),
             "RAM used / total bytes": [cpu.get("ram_used_bytes"), cpu.get("ram_total_bytes")],
-            "Piper revision": "fee9b9cefae4ebf9e196cfe994dea418f051506c",
+            "Piper revision": os.environ.get("PIPER_REVISION", "unknown"),
+            "Piper version": piper_version(),
             "Auto GPU DataLoader workers": workers_for("cuda", physical_cpu_count(), effective_cpu_count()),
             "Auto CPU DataLoader workers": workers_for("cpu", physical_cpu_count(), effective_cpu_count()),
             "PyTorch default threads": default_threads}

@@ -24,7 +24,7 @@ class LearningScheduleTests(unittest.TestCase):
                 return self.weight.square().mean()
 
             def validation_step(self, batch, batch_idx):
-                self.log("val_loss", self.weight.square().mean())
+                self.log("val_mel", self.weight.square().mean())
 
             def configure_optimizers(self):
                 return torch.optim.SGD(self.parameters(), lr=0.01)
@@ -75,9 +75,13 @@ class LearningScheduleTests(unittest.TestCase):
                     "lr_decay": 0.5, "lr_decay_d": 0.25})
                 self.model_g = torch.nn.Linear(1, 1)
                 self.model_d = torch.nn.Linear(1, 1)
+                self.model_mrd = None
+                self._warmstart_ckpt = None
+                self._vocoder_warmstart_ckpt = None
+                self._mos_predictor = None
 
             def _compute_loss(self, batch):
-                return self.model_g(batch).square().mean(), self.model_d(batch).square().mean()
+                return self.model_g(batch).square().mean(), self.model_d(batch).square().mean(), {}
 
             def train_dataloader(self):
                 return DataLoader(torch.ones(2, 1), batch_size=1)

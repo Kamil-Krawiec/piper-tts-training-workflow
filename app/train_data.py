@@ -29,3 +29,8 @@ class SavedSplitDataModule(VitsDataModule):
         self.test_dataset = Subset(full_dataset, indices["test"])
         logging.getLogger(__name__).info("Using saved dataset splits: %s train / %s validation / %s test",
             len(self.train_dataset), len(self.val_dataset), len(self.test_dataset))
+
+    def train_dataloader(self):
+        # v1.8.0 drops the final batch by default. Keep all saved training rows
+        # and match the supervisor's ceiling-based batch/ETA calculation.
+        return self._make_dataloader(self.train_dataset, shuffle=True, drop_last=False)

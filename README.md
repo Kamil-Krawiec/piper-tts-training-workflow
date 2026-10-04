@@ -1,6 +1,6 @@
 # Piper Voice Trainer
 
-Record your voice, prepare a speech dataset, train a Piper voice, and export it for text-to-speech—all from a browser UI. Projects, recordings, training progress, and exported voices are saved locally.
+Record your voice, prepare a speech dataset, train a Piper voice, and export it for text-to-speech—all from a browser UI. Projects, recordings, training progress, and exported voices are saved locally. The training image uses Piper v1.8.0, pinned to an exact upstream commit.
 
 You can record and review samples on a CPU machine, then transfer a dataset ZIP to an NVIDIA GPU machine for training. The app supports fine-tuning an existing Piper checkpoint or training a single-speaker voice from scratch. Exported voices contain an ONNX model and its JSON configuration, ready for Piper inference.
 
@@ -115,7 +115,9 @@ Start with **Auto** batch size, DataLoader workers, and CPU threads. CUDA batch 
 
 The Train step shows epoch progress, loss curves, throughput, hardware use, and an estimated finish time. Loss curves appear after logged batches; runtime estimates need enough measured batches and can change during training. Reopening the UI restores saved progress.
 
-In **Device and training settings**, set **Save checkpoint every X epochs** (default: 250). Each milestone is retained, so short intervals require more disk space. Training also saves a rolling checkpoint every 25 epochs, the lowest-validation-loss checkpoint, and a final checkpoint. Use the Voice step to compare checkpoints on the same listening sentences. Validation loss is a guide; choose your voice by listening.
+In **Device and training settings**, set **Save checkpoint every X epochs** (default: 250). Each milestone is retained, so short intervals require more disk space. Training also saves a rolling checkpoint every 25 epochs, the checkpoint with the lowest validation mel reconstruction loss (`val_mel`), and a final checkpoint. Use the Voice step to compare checkpoints on the same listening sentences. Validation loss is a guide; choose your voice by listening.
+
+Piper's individual training and validation losses are saved in the metrics CSV. Optional MOS scoring is disabled so training does not need to download another scoring model. The run diagnostics record the installed Piper version and revision.
 
 The generator and discriminator learning rates are configurable (defaults: `0.0002` and `0.0001`). Fine-tuning preserves the rates you select instead of inheriting them from the base checkpoint. Both rates decay once per completed epoch and the rates actually used appear as `lr_g` and `lr_d` in the run's metrics CSV. Current optimizer rates are available in training diagnostics. Lower rates are an experiment, not a guarantee of better voice quality.
 

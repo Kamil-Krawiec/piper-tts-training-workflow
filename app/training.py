@@ -61,6 +61,7 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         "--model.sample_rate", str(int(config["sample_rate"])),
         "--model.learning_rate", str(rates["learning_rate"]),
         "--model.learning_rate_d", str(rates["learning_rate_d"]),
+        "--model.mos_metric", "none",
         "--data.espeak_voice", str(config["espeak_voice"]),
         "--data.cache_dir", str(config["cache_dir"]),
         "--data.config_path", str(config["config_path"]),
@@ -108,7 +109,7 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         callbacks.append({"class_path": "app.training_metrics.RunModelCheckpoint", "init_args": {
             "role": "best",
             "dirpath": str(run_dir / "checkpoints" / "best"), "filename": "best-epoch-{epoch:04d}",
-            "auto_insert_metric_name": False, "monitor": "val_loss", "mode": "min", "save_top_k": 1,
+            "auto_insert_metric_name": False, "monitor": "val_mel", "mode": "min", "save_top_k": 1,
             "save_on_train_epoch_end": True}})
         command.extend(("--trainer.callbacks", json.dumps(callbacks)))
     if config["device"] not in {"cpu", "cuda"}:

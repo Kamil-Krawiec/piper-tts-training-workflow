@@ -74,13 +74,24 @@ class SavedSplitTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("piper"), "Piper training runtime required")
     def test_piper_setup_uses_exact_saved_membership_even_after_seed_changes(self):
         from app.train_data import SavedSplitDataModule
+        from piper.config import PiperConfig, PhonemeType
+        from torch.utils.data import RandomSampler
         import torch
         for seed in (42, 99):
             torch.manual_seed(seed)
             data = SavedSplitDataModule(dataset_dir=str(self.root), csv_path=str(self.root / "metadata.csv"),
                 audio_dir=str(self.root / "audio"), cache_dir=str(self.root / "cache"),
-                config_path=str(self.root / "voice.json"), voice_name="test", espeak_voice="pl")
+                config_path=str(self.root / "voice.json"), voice_name="test", espeak_voice="pl",
+                batch_size=32, num_workers=0)
+            # Membership-only fixture: real preprocessing is covered by the audio smoke run.
+            data.piper_config = PiperConfig(num_symbols=256, num_speakers=1,
+                sample_rate=22050, espeak_voice="pl", phoneme_id_map={}, phoneme_type=PhonemeType.ESPEAK)
             data.setup("fit")
             self.assertEqual(data.train_dataset.indices, list(range(605)))
             self.assertEqual(data.val_dataset.indices, list(range(605, 676)))
             self.assertEqual(data.test_dataset.indices, list(range(676, 712)))
+            loader = data.train_dataloader()
+            self.assertEqual(len(loader), 19)
+            self.assertFalse(loader.drop_last)
+            self.assertIsInstance(loader.sampler, RandomSampler)
+            self.assertEqual(sorted(loader.sampler), list(range(605)))

@@ -29,6 +29,14 @@ def main() -> None:
     logger = logging.getLogger(__name__)
 
     class CheckpointCompatibleCLI(base_cli):
+        def __init__(self, *args, **kwargs):
+            # The UI supplies its own checkpoint policy. Do not append upstream's
+            # additional mel/MOS checkpoints (MOS may be disabled or unavailable).
+            defaults = dict(kwargs.get("trainer_defaults", {}))
+            defaults.pop("callbacks", None)
+            kwargs["trainer_defaults"] = defaults
+            super().__init__(*args, **kwargs)
+
         def _parse_ckpt_path(self) -> None:
             """Load current model hparams, ignoring obsolete fields saved by old Piper."""
             if not self.config.get("subcommand"):
@@ -50,7 +58,7 @@ def main() -> None:
                 name: value
                 for name, value in hparams.items()
                 if (name in model_parameters or name == "_class_path")
-                and name not in {"learning_rate", "learning_rate_d"}
+                and name not in {"learning_rate", "learning_rate_d", "mos_metric"}
             }
             if not hparams:
                 return
