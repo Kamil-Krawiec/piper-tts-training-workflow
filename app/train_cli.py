@@ -20,6 +20,9 @@ def main() -> None:
     # PyTorch 2.6 rejects PosixPath in otherwise weights-only Piper checkpoints.
     # Keep weights_only=True and allow only this harmless metadata type.
     from piper.train import __main__ as piper_cli
+    from app.train_data import SavedSplitDataModule
+
+    piper_cli.VitsDataModule = SavedSplitDataModule
 
     base_cli = piper_cli.VitsLightningCLI
     model_parameters = inspect.signature(piper_cli.VitsModel.__init__).parameters

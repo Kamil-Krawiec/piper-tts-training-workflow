@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 
 from app.performance import estimate_runtime
 
@@ -17,6 +17,18 @@ def _atomic_json(path: Path, value: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+class RunModelCheckpoint(ModelCheckpoint):
+    """Distinct roles must stay checkpointable even when their intervals match."""
+
+    def __init__(self, role: str, **kwargs):
+        self.role = role
+        super().__init__(**kwargs)
+
+    @property
+    def state_key(self) -> str:
+        return f"{super().state_key}:{self.role}"
 
 
 class LearningRateSchedule(Callback):

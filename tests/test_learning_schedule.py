@@ -7,6 +7,55 @@ from pathlib import Path
 
 @unittest.skipUnless(importlib.util.find_spec("piper") and importlib.util.find_spec("lightning"), "Piper training runtime required")
 class LearningScheduleTests(unittest.TestCase):
+    def test_equal_checkpoint_intervals_can_be_registered_and_saved_together(self):
+        import json
+        from importlib import import_module
+        import torch
+        from lightning.pytorch import LightningModule, Trainer
+        from torch.utils.data import DataLoader
+        from app.training import build_training_command
+
+        class TinyModel(LightningModule):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(1))
+
+            def training_step(self, batch, batch_idx):
+                return self.weight.square().mean()
+
+            def validation_step(self, batch, batch_idx):
+                self.log("val_loss", self.weight.square().mean())
+
+            def configure_optimizers(self):
+                return torch.optim.SGD(self.parameters(), lr=0.01)
+
+            def train_dataloader(self):
+                return DataLoader(torch.ones(1, 1))
+
+            def val_dataloader(self):
+                return DataLoader(torch.ones(1, 1))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = {"voice_name": "test", "csv_path": "metadata.csv", "audio_dir": "audio",
+                      "sample_rate": 22050, "espeak_voice": "pl", "cache_dir": "cache",
+                      "config_path": "voice.json", "device": "cpu", "batch_size": 1,
+                      "training_mode": "scratch", "run_dir": temporary, "checkpoint_interval": 25}
+            command = build_training_command(config)
+            definitions = json.loads(command[command.index("--trainer.callbacks") + 1])
+            callbacks = []
+            for definition in definitions:
+                if not definition["class_path"].endswith("ModelCheckpoint"):
+                    continue
+                module, name = definition["class_path"].rsplit(".", 1)
+                callbacks.append(getattr(import_module(module), name)(**definition["init_args"]))
+            trainer = Trainer(max_epochs=25, logger=False, enable_progress_bar=False,
+                              enable_model_summary=False, callbacks=callbacks)
+            trainer.fit(TinyModel())
+            self.assertEqual(len({callback.state_key for callback in callbacks}), 3)
+            self.assertTrue((Path(temporary) / "checkpoints/epoch-0024.ckpt").is_file())
+            self.assertTrue((Path(temporary) / "checkpoints/latest/last.ckpt").is_file())
+            self.assertEqual(len(list((Path(temporary) / "checkpoints/best").glob("*.ckpt"))), 1)
+
     def test_manual_optimizers_decay_once_per_epoch_and_log_used_rates(self):
         import torch
         from torch.utils.data import DataLoader

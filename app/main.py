@@ -21,7 +21,7 @@ import pandas as pd
 from app.audio import inspect_wav, normalize_audio, trim_edge_silence
 from app.bundles import export_bundle, import_bundle
 from app.checkpoints import download_checkpoint
-from app.datasets import create_dataset
+from app.datasets import create_dataset, saved_split_indices
 from app.export import export_onnx, package_model, publish_model, snapshot_checkpoint, validate_voice_name
 from app.inference import synthesize
 from app.projects import ProjectStore
@@ -539,7 +539,7 @@ def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_pat
             "dataset_dir": str(dataset), "voice_name": validate_voice_name(project["name"].replace(" ", "-")),
             "sample_rate": int(project_info.get("sample_rate", 22050)),
             "espeak_voice": project_info.get("espeak_voice", project["espeak_voice"]),
-            "csv_path": str(dataset / ("train_metadata.csv" if (dataset / "train_metadata.csv").is_file() else "metadata.csv")), "audio_dir": str(dataset / "audio"),
+            "csv_path": str(dataset / "metadata.csv"), "audio_dir": str(dataset / "audio"),
             "cache_dir": str(run_dir / "cache"), "config_path": str(run_dir / "voice.onnx.json"),
             "run_dir": str(run_dir), "training_mode": mode,
             "checkpoint": (checkpoint_path or None) if mode == "finetune" else None,
@@ -548,7 +548,7 @@ def start_training(project_id: str, dataset_name: str, mode: str, checkpoint_pat
             **_training_options(selected_device, batch_size, custom_batch, workers, custom_workers, threads, hourly_rate),
             "seed": int(seed), "max_epochs": int(max_epochs),
             "checkpoint_interval": checkpoint_interval, "learning_rate": learning_rate, "learning_rate_d": learning_rate_d,
-            "validation_split": 0.1, "num_test_examples": 5,
+            "split_mode": "saved", "validation_split": 0.0, "num_test_examples": 0,
             "piper_revision": "fee9b9cefae4ebf9e196cfe994dea418f051506c",
             "base_checkpoint_hash": _hash_if_exists(Path(checkpoint_path)) if mode == "finetune" and checkpoint_path else None,
         }
@@ -889,10 +889,7 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
     try:
         dataset = _selected_dataset(project_id, dataset_name)
         manifest = json.loads((dataset / "dataset.json").read_text(encoding="utf-8")) if (dataset / "dataset.json").exists() else {}
-        split_sizes = {}
-        for name in ("train", "validation", "test"):
-            path = dataset / "splits" / f"{name}.json"
-            split_sizes[name] = len(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else "not supplied"
+        split_sizes = {name: len(values) for name, values in saved_split_indices(dataset).items()}
         selected_device = device
         try:
             import torch
@@ -907,7 +904,7 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
         return (
             f"### Review this run before starting\n\n"
             f"Dataset: **{dataset.name}** · Samples: **{manifest.get('sample_count', 'imported')}** · "
-            f"Training samples: **{manifest.get('training_sample_count', 'see metadata')}** · "
+            f"Training samples: **{split_sizes['train']}** · "
             f"Total audio: **{_clock(manifest.get('total_seconds', 0))}**\n\n"
             f"Fixed train / validation / test audio: **{_clock(manifest.get('split_durations_seconds', {}).get('train', 0))} / "
             f"{_clock(manifest.get('split_durations_seconds', {}).get('validation', 0))} / "
@@ -918,7 +915,7 @@ def prepare_training_summary(project_id: str, dataset_name: str, mode: str, chec
             f"Vocoder warm-start: **{Path(warmstart_path).name if mode == 'scratch' and warmstart_path else 'none'}**\n\n"
             f"Sample rate: **22050 Hz** · eSpeak: **{project['espeak_voice']}** · Device: **{selected_device.upper()}** · Batch size: **{actual_batch}** · "
             f"DataLoader workers: **{workers}**\n\n"
-            f"Maximum epochs: **{int(max_epochs)}** · Seed: **{int(seed)}** · Piper internal validation: **10% / 5 test examples**\n\n"
+            f"Maximum epochs: **{int(max_epochs)}** · Seed: **{int(seed)}** · Uses the saved dataset splits directly; no additional random split.\n\n"
             f"Keep checkpoint every **{checkpoint_interval} epochs**, plus rolling, best-validation and final checkpoints.\n\n"
             f"Generator / discriminator learning rates: **{learning_rate} / {learning_rate_d}**, stepped after each epoch and logged.\n\n"
             f"**Training time estimate:** available after warm-up and at least 10 measured training batches. "

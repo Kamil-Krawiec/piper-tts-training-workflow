@@ -11,6 +11,46 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+def saved_split_indices(dataset_dir: Path) -> dict[str, list[int]]:
+    """Validate the saved partition and map sample IDs to the full metadata CSV."""
+    root = Path(dataset_dir)
+    with (root / "metadata.csv").open(encoding="utf-8", newline="") as stream:
+        entries = list(csv.reader(stream, delimiter="|"))
+    index = json.loads((root / "sample-index.json").read_text(encoding="utf-8"))
+    if not isinstance(index, list) or len(index) != len(entries):
+        raise ValueError("sample-index.json must map every dataset metadata row")
+    positions = {tuple(row): i for i, row in enumerate(entries)}
+    if len(positions) != len(entries):
+        raise ValueError("Dataset metadata contains duplicate rows")
+    by_id = {}
+    for row in index:
+        if not isinstance(row, dict) or not all(isinstance(row.get(key), str) and row[key]
+                for key in ("sample_id", "filename", "text", "split")):
+            raise ValueError("sample-index.json contains an invalid recording")
+        pair = (row["filename"], row["text"])
+        if pair not in positions:
+            raise ValueError("sample-index.json filenames and text must match metadata.csv")
+        if row["sample_id"] in by_id:
+            raise ValueError("sample-index.json contains duplicate IDs")
+        by_id[row["sample_id"]] = (positions[pair], row["split"])
+    result = {}
+    seen = set()
+    for name in ("train", "validation", "test"):
+        ids = json.loads((root / "splits" / f"{name}.json").read_text(encoding="utf-8"))
+        if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+            raise ValueError(f"Saved {name} split must contain sample IDs")
+        for value in ids:
+            if value not in by_id or value in seen or by_id[value][1] != name:
+                raise ValueError("Saved splits contain unknown, duplicate or inconsistent sample IDs")
+            seen.add(value)
+        result[name] = sorted(by_id[value][0] for value in ids)
+    if seen != set(by_id) or len({i for values in result.values() for i in values}) != len(entries):
+        raise ValueError("Saved splits must partition every metadata row exactly once")
+    if not result["train"]:
+        raise ValueError("Saved dataset has no training samples")
+    return result
+
+
 def _rank(seed: int, sample_id: str) -> bytes:
     return hashlib.sha256(f"{seed}:{sample_id}".encode("utf-8")).digest()
 

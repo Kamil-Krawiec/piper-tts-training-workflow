@@ -18,6 +18,7 @@ from app.performance import (GPU_BATCH_CANDIDATES, GPU_MEMORY_MARGIN, available_
                              cpu_threads_for, effective_cpu_count, gpu_snapshot,
                              physical_cpu_count, select_batch_size, workers_for)
 from app.training import build_training_command, training_pythonpath
+from app.datasets import saved_split_indices
 
 
 def _save_config(path: Path, config: dict[str, Any]) -> None:
@@ -95,7 +96,12 @@ def run(config_path: Path) -> int:
     with Path(config["csv_path"]).open(encoding="utf-8", newline="") as stream:
         rows = list(csv.reader(stream, delimiter="|"))
     samples = len(rows)
-    train_count = samples - int(samples * config.get("validation_split", 0.1)) - int(config.get("num_test_examples", 5))
+    if config.get("split_mode") == "saved":
+        indices = saved_split_indices(Path(config["dataset_dir"]))
+        config["split_counts"] = {name: len(values) for name, values in indices.items()}
+        train_count = config["split_counts"]["train"]
+    else:
+        train_count = samples - int(samples * config.get("validation_split", 0.1)) - int(config.get("num_test_examples", 5))
     if train_count <= 0:
         raise ValueError("Dataset has no training samples after Piper's validation and test split")
     config["training_samples"] = train_count

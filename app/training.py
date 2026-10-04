@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from app.performance import epoch_cap_for
+from app.datasets import saved_split_indices
 
 
 def training_pythonpath() -> str:
@@ -76,6 +77,12 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
         "--trainer.enable_progress_bar", "false",
         "--seed_everything", str(int(config.get("seed", 42))),
     ]
+    if config.get("split_mode") == "saved":
+        saved_split_indices(Path(config["dataset_dir"]))
+        command[command.index("--data.csv_path") + 1] = str(Path(config["dataset_dir"]) / "metadata.csv")
+        command[command.index("--data.validation_split") + 1] = "0.0"
+        command[command.index("--data.num_test_examples") + 1] = "0"
+        command.extend(("--data.dataset_dir", str(config["dataset_dir"])))
     if config.get("probe"):
         callbacks = [{"class_path": "app.training_metrics.ProbeMetrics", "init_args": {
             "path": str(run_dir / "probe-result.json")}}]
@@ -89,14 +96,17 @@ def build_training_command(config: dict[str, Any]) -> list[str]:
             "steps_per_epoch": int(config.get("steps_per_epoch", 0)),
             "max_epochs": int(config.get("max_epochs", epoch_cap_for(mode))),
             "hourly_rate": config.get("gpu_hourly_rate")}}]
-        callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
+        callbacks.append({"class_path": "app.training_metrics.RunModelCheckpoint", "init_args": {
+            "role": "milestone",
             "dirpath": str(run_dir / "checkpoints"), "filename": "epoch-{epoch:04d}",
             "auto_insert_metric_name": False, "every_n_epochs": int(interval),
             "save_top_k": -1, "save_last": False}})
-        callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
+        callbacks.append({"class_path": "app.training_metrics.RunModelCheckpoint", "init_args": {
+            "role": "rolling",
             "dirpath": str(run_dir / "checkpoints" / "latest"), "filename": "rolling",
             "every_n_epochs": 25, "save_top_k": 0, "save_last": True}})
-        callbacks.append({"class_path": "lightning.pytorch.callbacks.ModelCheckpoint", "init_args": {
+        callbacks.append({"class_path": "app.training_metrics.RunModelCheckpoint", "init_args": {
+            "role": "best",
             "dirpath": str(run_dir / "checkpoints" / "best"), "filename": "best-epoch-{epoch:04d}",
             "auto_insert_metric_name": False, "monitor": "val_loss", "mode": "min", "save_top_k": 1,
             "save_on_train_epoch_end": True}})
@@ -180,7 +190,7 @@ def validate_training_config(config: dict[str, Any], cuda_available: bool | None
             errors.append("Could not check the selected eSpeak voice.")
     try:
         build_training_command(config)
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, OSError) as error:
         if str(error) not in errors:
             errors.append(str(error))
     return errors
