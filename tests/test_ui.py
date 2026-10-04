@@ -280,6 +280,16 @@ class GuidedUITests(unittest.TestCase):
         self.assertEqual(result[2], "voice.zip")
         self.assertIn("run", result[1])
 
+    def test_comparison_uses_selected_checkpoints_and_clears_failure(self):
+        with patch.object(self.ui, "generate_checkpoint_sample", side_effect=[
+                ("a.wav", "A", "a.zip", {}), ("b.wav", "B", "b.zip", {})]) as generate:
+            result = self.ui.compare_checkpoints("project", "run", "Voice", "a.ckpt", "b.ckpt", "Sentence")
+        self.assertEqual(result[:2], ("a.wav", "b.wav"))
+        self.assertEqual([call.args[3] for call in generate.call_args_list], ["a.ckpt", "b.ckpt"])
+        with patch.object(self.ui, "generate_checkpoint_sample", return_value=(None, "Failed", None, {})):
+            self.assertEqual(self.ui.compare_checkpoints("p", "r", "V", "a", "b", "Text"), (None, None, "Failed"))
+        self.assertEqual(self.ui.compare_checkpoints("p", "r", "V", "a", "a", "Text")[:2], (None, None))
+
     def test_empty_preview_text_does_not_export(self):
         with patch.object(self.ui, "export_run") as export:
             result = self.ui.generate_checkpoint_sample("project", "run", "Voice", "last.ckpt", "  ")

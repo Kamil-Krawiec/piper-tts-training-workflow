@@ -62,3 +62,23 @@ def publish_model(model: Path, config: Path, voice_dir: Path) -> tuple[Path, Pat
     shutil.copy2(model, destinations[0])
     shutil.copy2(config, destinations[1])
     return destinations
+
+
+def package_training_run(run_dir: Path, archive: Path) -> Path:
+    """Archive durable run artifacts; reject files changing during the download."""
+    run_dir, archive = Path(run_dir), Path(archive)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    files = [p for p in run_dir.rglob("*") if p.is_file() and not p.is_symlink()
+             and "probe" not in p.relative_to(run_dir).parts and p.name != "pid"]
+    try:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(files):
+                before = path.stat()
+                bundle.write(path, path.relative_to(run_dir).as_posix())
+                after = path.stat()
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                    raise ValueError("Training artifacts changed while being archived. Retry after training stops.")
+    except Exception:
+        archive.unlink(missing_ok=True)
+        raise
+    return archive

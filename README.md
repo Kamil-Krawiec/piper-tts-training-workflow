@@ -125,6 +125,10 @@ The generator and discriminator learning rates are configurable (defaults: `0.00
 
 The Voice step exports the selected checkpoint automatically when generating a listening sample, then packages the ONNX model and matching JSON configuration in a downloadable ZIP. Keep both files together when loading the voice into Piper. Checkpoint choices refresh during training and your selection stays selected.
 
+For a complete run archive, open **Download all training artifacts** after training finishes. It contains saved checkpoints, CSV metrics, hardware telemetry, logs and configuration. Keep the dataset ZIP from Step 4 separately. If an artifact changes during packaging, retry after training stops.
+
+Open **Compare two checkpoints** to compare the selected checkpoint (A) with checkpoint B using identical text. Changing either checkpoint or the text clears the previous comparison.
+
 To preserve training weights, open **Download checkpoint for further training** and prepare the selected `.ckpt` download. This makes a stable copy, including when you choose the rolling checkpoint. Keep the dataset ZIP as well. An ONNX voice is for speech generation and cannot be converted back into a full training checkpoint. Upload the `.ckpt` in Step 5 to start a new fine-tuning session from its weights; this does not resume the old epoch or optimizer state.
 
 ### Optional text-to-speech API
