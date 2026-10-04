@@ -57,11 +57,14 @@ def _rank(seed: int, sample_id: str) -> bytes:
 
 def create_dataset(
     samples: Iterable[dict[str, Any]], output_dir: Path, target_seconds: int | None,
-    seed: int = 42,
+    seed: int = 42, split_by_id: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Select a stable, nested subset and write Piper audio/metadata files."""
     accepted = [sample for sample in samples if sample.get("status", "accepted") == "accepted"]
-    evaluation_ranked = sorted(accepted, key=lambda sample: _rank(seed + 1, str(sample["id"])))
+    split_by_id = split_by_id or {}
+    if any(value not in {"train", "validation", "test"} for value in split_by_id.values()):
+        raise ValueError("Invalid saved split")
+    evaluation_ranked = sorted((sample for sample in accepted if str(sample["id"]) not in split_by_id), key=lambda sample: _rank(seed + 1, str(sample["id"])))
     if len(evaluation_ranked) >= 3:
         test_count = max(1, round(len(evaluation_ranked) * 0.05))
         validation_count = max(1, round(len(evaluation_ranked) * 0.10))
@@ -73,6 +76,8 @@ def create_dataset(
         test_count, validation_count = 0, 0
     test_samples = evaluation_ranked[:test_count]
     validation_samples = evaluation_ranked[test_count:test_count + validation_count]
+    test_samples += [sample for sample in accepted if split_by_id.get(str(sample["id"])) == "test"]
+    validation_samples += [sample for sample in accepted if split_by_id.get(str(sample["id"])) == "validation"]
     evaluation_samples = test_samples + validation_samples
     evaluation_ids = {str(sample["id"]) for sample in evaluation_samples}
     train_ranked = sorted((sample for sample in accepted if str(sample["id"]) not in evaluation_ids), key=lambda sample: _rank(seed, str(sample["id"])))

@@ -26,6 +26,7 @@ from app.datasets import create_dataset, saved_split_indices
 from app.export import export_onnx, package_model, publish_model, snapshot_checkpoint, validate_voice_name
 from app.inference import synthesize
 from app.projects import ProjectStore
+from app.recording_review import review_rows
 from app.text import estimate_text, parse_prompts, prompt_recommendation
 from app.training import TrainingJobs, batch_size_for, validate_training_config
 from app.performance import cpu_snapshot, epoch_cap_for, effective_cpu_count, gpu_snapshot, physical_cpu_count, workers_for
@@ -152,7 +153,9 @@ def _project_summary(project_id: str | None) -> str:
 
 def imported_audio_metrics(project_id: str) -> dict[str, float]:
     """Count each imported sample once, excluding recordings already in this project."""
-    seen = {sample["id"] for sample in STORE.list_samples(project_id) if sample["status"] == "accepted"}
+    # Registered clips (including rejected/replaced takes) already have review state.
+    seen = {value for sample in STORE.list_samples(project_id)
+            for value in (sample["id"], sample["quality"].get("source_sample_id")) if value}
     count, seconds = 0, 0.0
     for dataset in _dataset_dirs(project_id):
         if not dataset.name.startswith("imported-"):
@@ -394,8 +397,66 @@ def review_sample(project_id: str, sample_id: str, status: str):
         return gr.update(choices=_sample_choices(project_id), value=sample_id), _project_summary(project_id), str(error), _queue_rows(project_id)
 
 
+def recording_review_list(project_id, dataset_name=None, filter_name="Needs review", search="", selected=None, advance=False):
+    try:
+        choices = _dataset_choices(project_id)
+        names = [value for _, value in choices]
+        dataset_name = dataset_name if dataset_name in names else (names[-1] if names else None)
+        dataset = _selected_dataset(project_id, dataset_name) if dataset_name else None
+        if dataset and (dataset / "sample-index.json").is_file():
+            STORE.register_dataset_recordings(project_id, dataset)
+        rows = review_rows(STORE, project_id, dataset)
+        matches = [row for row in rows if (filter_name == "All recordings" or row["needs_review"])
+                   and search.casefold().strip() in row["text"].casefold()]
+        ids = [row["id"] for row in matches]
+        if selected not in ids:
+            selected = ids[0] if ids else None
+        elif advance:
+            selected = ids[(ids.index(selected) + 1) % len(ids)]
+        options = [(f"{row['status'].capitalize()} · {row['duration_seconds']:.1f}s · {row['text'][:80]}", row["id"]) for row in matches]
+        flagged = sum(row["needs_review"] for row in rows)
+        summary = f"**{flagged} need review** · {len(rows)} recordings. Flags are checks to make, not proof of bad audio."
+        if not matches:
+            summary += " No matching recordings; choose All recordings to browse."
+        return gr.update(choices=options, value=selected), summary, gr.update(choices=choices, value=dataset_name)
+    except Exception as error:
+        return gr.update(choices=[], value=None), f"Could not load review: {error}", gr.update()
+
+
+def recording_review_details(project_id, sample_id, dataset_name=None):
+    try:
+        dataset = _selected_dataset(project_id, dataset_name) if dataset_name else None
+        row = next((item for item in review_rows(STORE, project_id, dataset) if item["id"] == sample_id), None)
+        if row is None:
+            return None, None, "Choose a recording.", "", *(gr.update(interactive=False) for _ in range(4))
+        reason = " · ".join(row["reasons"]) or "No automatic warnings. Listen for missing words, unnatural delivery and cut beginnings or endings."
+        if row["quality"].get("imported"):
+            details = "Imported dataset audio; the original untrimmed recording is not in this bundle."
+        elif row["removed_seconds"] is not None:
+            details = f"Dataset preparation removed {row['removed_seconds']:.2f}s from the edges. This does not measure Piper's later training-time trimming."
+        else:
+            details = "No matching dataset copy selected."
+        return row["original"], row["dataset_audio"], f"**Sentence:** {row['text']}\n\n**{row['status'].capitalize()}** · {reason}", details, *(gr.update(interactive=True) for _ in range(4))
+    except Exception as error:
+        return None, None, f"Could not load recording: {error}", "", *(gr.update(interactive=False) for _ in range(4))
+
+
+def rerecord_sample(project_id, sample_id):
+    try:
+        sample = next(item for item in STORE.list_samples(project_id) if item["id"] == sample_id)
+        prompts = STORE.get_project(project_id)["prompts"]
+        position = next(i for i, prompt in enumerate(prompts) if prompt["id"] == sample["prompt_id"])
+        STORE.set_sample_status(project_id, sample_id, "review")
+        return (*current_prompt(project_id, position), "Record new", None, "Record a replacement below. The previous take is excluded from new datasets until kept or replaced.")
+    except Exception as error:
+        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), f"Could not prepare re-recording: {error}"
+
+
 def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
     try:
+        for dataset in _dataset_dirs(project_id):
+            if (dataset / "sample-index.json").is_file():
+                STORE.register_dataset_recordings(project_id, dataset)
         sample_rows = STORE.list_samples(project_id)
         target_seconds = {"15 minutes": 15 * 60, "30 minutes": 30 * 60, "60 minutes": 60 * 60, "All accepted": None}.get(target)
         if target == "Custom duration":
@@ -413,6 +474,9 @@ def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
                     prepared_samples.append(sample)
                     continue
                 source = Path(sample["audio_file"])
+                if sample["quality"].get("imported"):
+                    prepared_samples.append(sample)
+                    continue
                 trimmed = Path(staging) / f"{sample['id']}.wav"
                 trim_edge_silence(source, trimmed)
                 prepared_samples.append({
@@ -420,7 +484,8 @@ def make_dataset(project_id: str, target: str, custom_minutes: int = 30):
                     "audio_file": str(trimmed),
                     "duration_seconds": inspect_wav(trimmed)["duration_seconds"],
                 })
-            manifest = create_dataset(prepared_samples, output, target_seconds, seed=42)
+            fixed_splits = {sample["id"]: sample["quality"]["source_split"] for sample in prepared_samples if sample["quality"].get("source_split")}
+            manifest = create_dataset(prepared_samples, output, target_seconds, seed=42, split_by_id=fixed_splits)
         project = STORE.get_project(project_id)
         info = {key: project[key] for key in ("name", "language", "espeak_voice")}
         info.update({"sample_rate": 22050, "dataset_id": dataset_id})
@@ -1073,31 +1138,45 @@ def build_app() -> gr.Blocks:
 
             with gr.Tab("3 · Record", id=3, interactive=progress.blocked_reason(3) is None, elem_classes="step-page") as record_tab:
                 step_heading(3, "Record your voice", "Read one prompt at a time. Listen, then accept the take or record it again.")
-                active_prompt_id = gr.State(value=None)
-                prompt_progress = gr.Markdown("0 / 0")
-                current_text = gr.Markdown("Prepare a prompt queue in Step 2 first.", elem_id="recording-prompt")
-                gr.Markdown("Use a quiet room and keep the same microphone distance. Play your take before accepting it.")
-                recording = gr.Audio(label="Your microphone recording", sources=["microphone"], type="filepath")
-                with gr.Row():
-                    accept_button = gr.Button("Accept & next prompt", variant="primary")
-                    review_button = gr.Button("Save take for review")
-                    reject_button = gr.Button("Reject take", variant="stop")
-                record_result = gr.Markdown()
-                with gr.Accordion("Listen to the last saved take", open=False):
-                    sample_player = gr.Audio(label="Last saved recording", interactive=False)
-                prompt_position = gr.State(value=0)
-                with gr.Row():
-                    prev_button = gr.Button("← Previous prompt")
-                    next_button = gr.Button("Next prompt →")
-                with gr.Accordion("Review saved recordings", open=False):
-                    gr.Markdown("Only accepted takes enter a dataset. Choose a recording to listen or change its status.")
-                    sample_select = gr.Dropdown(label="Saved recording", choices=_sample_choices(initial_project), value=None, filterable=True)
-                    sample_audio_player = gr.Audio(label="Selected recording", interactive=False)
+                recording_mode = gr.Radio(["Record new", "Review recordings"], value="Record new", label="What would you like to do?")
+                with gr.Column() as record_panel:
+                    active_prompt_id = gr.State(value=None)
+                    prompt_progress = gr.Markdown("0 / 0")
+                    current_text = gr.Markdown("Prepare a prompt queue in Step 2 first.", elem_id="recording-prompt")
+                    gr.Markdown("Use a quiet room and keep the same microphone distance. Play your take before accepting it.")
+                    recording = gr.Audio(label="Your microphone recording", sources=["microphone"], type="filepath")
                     with gr.Row():
-                        accept_sample_button = gr.Button("Mark accepted")
-                        flag_sample_button = gr.Button("Mark for review")
-                        reject_sample_button = gr.Button("Mark rejected", variant="stop")
+                        accept_button = gr.Button("Accept & next prompt", variant="primary")
+                        review_button = gr.Button("Save take for review")
+                        reject_button = gr.Button("Reject take", variant="stop")
+                    record_result = gr.Markdown()
+                    with gr.Accordion("Listen to the last saved take", open=False):
+                        sample_player = gr.Audio(label="Last saved recording", interactive=False)
+                    prompt_position = gr.State(value=0)
+                    with gr.Row():
+                        prev_button = gr.Button("← Previous prompt")
+                        next_button = gr.Button("Next prompt →")
+                with gr.Column(visible=False) as review_panel:
+                    gr.Markdown("### Review your recordings\nListen to the sentence, then keep it or record a replacement. Decisions apply when you build a new dataset; saved datasets stay unchanged.")
+                    with gr.Row():
+                        review_filter = gr.Radio(["Needs review", "All recordings"], value="Needs review", label="Show", min_width=220)
+                        review_search = gr.Textbox(label="Find a sentence", placeholder="Search recording text", min_width=220)
+                    review_summary = gr.Markdown()
+                    sample_select = gr.Dropdown(label="Recording", choices=_sample_choices(initial_project), value=None, filterable=True)
                     sample_review_status = gr.Markdown()
+                    sample_audio_player = gr.Audio(label="Recording to review", interactive=False)
+                    with gr.Row():
+                        accept_sample_button = gr.Button("Keep", variant="primary", interactive=False)
+                        rerecord_button = gr.Button("Re-record", interactive=False)
+                        reject_sample_button = gr.Button("Reject", variant="stop", interactive=False)
+                        next_review_button = gr.Button("Next recording")
+                    review_action_status = gr.Markdown()
+                    with gr.Accordion("Comparison and review details", open=False):
+                        review_dataset = gr.Dropdown(label="Compare with dataset", choices=_dataset_choices(initial_project), value=None)
+                        dataset_audio_player = gr.Audio(label="Dataset copy", interactive=False)
+                        review_details = gr.Markdown()
+                        flag_sample_button = gr.Button("Flag for review", interactive=False)
+                        refresh_review_button = gr.Button("Refresh review list")
                 gr.Markdown("Continue when you have accepted recordings. You can return to record more later.")
                 with gr.Row(elem_classes="step-footer"):
                     back_record = gr.Button("← Step 2 · Text")
@@ -1253,9 +1332,28 @@ def build_app() -> gr.Blocks:
         for button, decision in ((accept_button, "accept"), (review_button, "review"), (reject_button, "reject")):
             button.click(lambda pid, idx, prompt_id, path, choice=decision: record_sample(pid, int(idx), prompt_id, path, choice), [project_select, prompt_position, active_prompt_id, recording], [record_result, sample_player, project_status, sample_select, prompt_position, queue_table, recording])
         prompt_position.change(lambda pid, idx: current_prompt(pid, int(idx)) if pid else (0, "", "0 / 0", None), [project_select, prompt_position], [prompt_position, current_text, prompt_progress, active_prompt_id])
-        sample_select.change(load_sample_audio, [project_select, sample_select], [sample_audio_player, sample_review_status])
+        review_inputs = [project_select, review_dataset, review_filter, review_search, sample_select]
+        review_outputs = [sample_select, review_summary, review_dataset]
+        detail_outputs = [sample_audio_player, dataset_audio_player, sample_review_status, review_details,
+                          accept_sample_button, rerecord_button, reject_sample_button, flag_sample_button]
+        recording_mode.change(lambda mode: (gr.update(visible=mode == "Record new"), gr.update(visible=mode == "Review recordings")),
+                              recording_mode, [record_panel, review_panel]).then(recording_review_list, review_inputs, review_outputs).then(
+                                  lambda pid: (_project_summary(pid), _queue_rows(pid)), project_select, [project_status, queue_table]).then(
+                                      recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
+        for component in (review_filter, review_dataset):
+            component.change(recording_review_list, review_inputs, review_outputs).then(recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
+        review_search.submit(recording_review_list, review_inputs, review_outputs).then(recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
+        refresh_review_button.click(recording_review_list, review_inputs, review_outputs).then(recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
+        next_review_button.click(lambda pid, ds, filt, query, sid: recording_review_list(pid, ds, filt, query, sid, True), review_inputs, review_outputs).then(recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
+        sample_select.change(recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
         for button, status in ((accept_sample_button, "accepted"), (flag_sample_button, "review"), (reject_sample_button, "rejected")):
-            button.click(lambda pid, sid, value=status: review_sample(pid, sid, value), [project_select, sample_select], [sample_select, project_status, sample_review_status, queue_table])
+            button.click(lambda pid, sid, value=status: review_sample(pid, sid, value), [project_select, sample_select],
+                         [sample_select, project_status, review_action_status, queue_table]).then(recording_review_list, review_inputs, review_outputs).then(recording_review_details, [project_select, sample_select, review_dataset], detail_outputs)
+        rerecord_button.click(rerecord_sample, [project_select, sample_select],
+                              [prompt_position, current_text, prompt_progress, active_prompt_id, recording_mode, recording, record_result]).then(
+                                  lambda pid: _queue_rows(pid), project_select, queue_table)
+        project_select.change(lambda: (None, "", "", "", "Needs review", "", "Record new", None),
+                              outputs=[review_dataset, review_summary, review_details, review_action_status, review_filter, review_search, recording_mode, dataset_audio_player])
         duration_target.change(lambda target: gr.update(visible=(target == "Custom duration")), duration_target, custom_minutes_input)
         create_dataset_button.click(make_dataset, [project_select, duration_target, custom_minutes_input], [dataset_select, train_dataset, dataset_status, project_status]).then(step_availability, project_select, step_tabs)
         export_dataset_button.click(export_dataset_ui, [project_select, dataset_select], [dataset_archive, dataset_transfer_status])
