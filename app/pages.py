@@ -211,6 +211,12 @@ def build_app(actions) -> gr.Blocks:
                     checkpoint_notice = gr.Markdown()
                 gr.Markdown("### 2. Choose the words & listen")
                 local_test_text = gr.Textbox(label="Shared listening text", value="Dzisiaj sprawdzam własny model głosu.", lines=3, info="Load a reference sentence below, or type your own text to test the checkpoint.")
+                with gr.Accordion("Speech settings · variation and speed", open=False):
+                    gr.Markdown("Leave a field blank to use the voice model’s default. Overrides apply to checkpoint speech and both generated A/B voices. The original recording stays unchanged.")
+                    with gr.Row():
+                        noise_scale = gr.Number(value=None, placeholder="Model default", minimum=0, step=0.01, label="noise_scale · voice variation", info="Generator noise. Lower values reduce variation.")
+                        noise_w = gr.Number(value=None, placeholder="Model default", minimum=0, step=0.01, label="noise_w · timing variation", info="Phoneme duration noise. Lower values reduce timing variation.")
+                        length_scale = gr.Number(value=None, placeholder="Model default", minimum=0.01, step=0.01, label="length_scale · speech speed", info="1 = normal, above 1 = slower, below 1 = faster.")
                 with gr.Row(equal_height=True, elem_id="voice-listening"):
                     with gr.Column(min_width=280, elem_classes="studio-panel"):
                         gr.Markdown("### Original speaker\nA real recording from the selected run’s held-out test set.")
@@ -342,7 +348,10 @@ def build_app(actions) -> gr.Blocks:
         refresh_voice_button.click(actions.refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button])
         voice_tab.select(actions.refresh_runs, [project_select, run_select, checkpoint_select], [run_status, run_select, run_progress, run_chart, checkpoint_select, export_model_button]).then(actions.checkpoint_help, [project_select, run_select], checkpoint_notice)
         run_select.input(actions.refresh_checkpoints, [project_select, run_select], [checkpoint_select, export_model_button])
-        export_model_button.click(actions.generate_checkpoint_sample, [project_select, run_select, model_name, checkpoint_select, local_test_text], [synth_audio, model_status, model_archive, model_select])
+        speech_inputs = [noise_scale, noise_w, length_scale]
+        export_model_button.click(actions.generate_checkpoint_sample, [project_select, run_select, model_name, checkpoint_select, local_test_text, *speech_inputs], [synth_audio, model_status, model_archive, model_select])
+        for setting in speech_inputs:
+            setting.change(lambda: (None, "", None, None, ""), outputs=[synth_audio, model_status, compare_audio_a, compare_audio_b, comparison_status])
         checkpoint_select.change(lambda checkpoint: gr.update(interactive=bool(checkpoint)), checkpoint_select, checkpoint_download_button)
         checkpoint_download_button.click(actions.download_run_checkpoint, [project_select, run_select, checkpoint_select], [checkpoint_download, checkpoint_download_status])
         local_test_text.input(lambda: (None, "", None, "Custom text: load a reference sentence again to compare matching words."), outputs=[synth_audio, model_status, reference_audio, reference_status])
@@ -363,7 +372,7 @@ def build_app(actions) -> gr.Blocks:
             picker.change(lambda a, b: gr.update(interactive=bool(a and b and a != b)), [comparison_a, comparison_b], compare_button)
             picker.change(lambda: (None, None, ""), outputs=[compare_audio_a, compare_audio_b, comparison_status])
         local_test_text.change(lambda: (None, None, ""), outputs=[compare_audio_a, compare_audio_b, comparison_status])
-        compare_button.click(actions.compare_voices, [project_select, model_name, comparison_a, comparison_b, local_test_text], [compare_audio_a, compare_audio_b, comparison_status])
+        compare_button.click(actions.compare_voices, [project_select, model_name, comparison_a, comparison_b, local_test_text, *speech_inputs], [compare_audio_a, compare_audio_b, comparison_status])
         publish_button.click(actions.publish_selected, model_select, publish_status)
         dataset_select.change(lambda dataset: gr.update(value=dataset), dataset_select, train_dataset)
         train_dataset.input(lambda dataset: gr.update(value=dataset), train_dataset, dataset_select)

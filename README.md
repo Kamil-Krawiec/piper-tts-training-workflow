@@ -125,6 +125,8 @@ The generator and discriminator learning rates are configurable (defaults: `0.00
 
 The Voice step exports the selected checkpoint automatically when generating a listening sample, then packages the ONNX model and matching JSON configuration in a downloadable ZIP. Keep both files together when loading the voice into Piper. Checkpoint choices refresh during training and your selection stays selected.
 
+Open **Speech settings · variation and speed** to adjust `noise_scale` (voice variation), `noise_w` (phoneme timing variation), and `length_scale` (speech speed: above 1 is slower, below 1 is faster). Blank fields preserve the model's defaults. Overrides apply to checkpoint previews and both generated A/B voices; the original recording is unchanged. The download keeps the model's original JSON defaults, so pass the same overrides to Piper when using the exported voice elsewhere.
+
 For a complete run archive, open **Download all training artifacts** after training finishes. It contains saved checkpoints, CSV metrics, hardware telemetry, logs and configuration. Keep the dataset ZIP from Step 4 separately. If an artifact changes during packaging, retry after training stops.
 
 In **Compare two generated voices · models or checkpoints**, choose **Voice A** and **Voice B**, then click **Generate A and B**. Each selector lists saved ONNX voice models and epoch checkpoints from all runs in the project. You can compare two models, two checkpoints, or one of each using the listening text above. The comparison selectors are independent of the single-checkpoint preview. Changing either selection or the text clears the previous comparison.

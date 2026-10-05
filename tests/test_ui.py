@@ -106,6 +106,11 @@ class GuidedUITests(unittest.TestCase):
         components = app.config["components"]
         workspace = next(item for item in components if item["props"].get("label") == "Training workspace")
         self.assertEqual(workspace["props"]["value"], "Setup")
+        speech_controls = [item for item in components if (item["props"].get("label") or "").startswith(("noise_scale", "noise_w", "length_scale"))]
+        self.assertEqual(len(speech_controls), 3)
+        for control in speech_controls:
+            self.assertIsNone(control["props"].get("value"))
+            self.assertEqual(control["props"]["placeholder"], "Model default")
         text = next(item for item in components if item["props"].get("label") == "Shared listening text")
         reference = next(item for item in components if item["props"].get("label") == "Original recording")
         self.assertTrue(any(reference["id"] in event["outputs"] for event in app.config["dependencies"]
@@ -307,6 +312,27 @@ class GuidedUITests(unittest.TestCase):
         self.assertEqual(result[0], "sample.wav")
         self.assertEqual(result[2], "voice.zip")
         self.assertIn("run", result[1])
+
+    def test_speech_overrides_reach_checkpoint_and_both_comparison_voices(self):
+        parameters = {"noise_scale": 0.3, "noise_w": 0.4, "length_scale": 1.2}
+        with patch.object(self.ui, "export_run", return_value=("voice.zip", "Exported", {"value": "voice.onnx"})), \
+             patch.object(self.ui, "synthesize_model", return_value=("sample.wav", "Generated")) as synth:
+            self.ui.generate_checkpoint_sample("project", "run", "Voice", "last.ckpt", "Sentence", **parameters)
+        synth.assert_called_once_with("voice.onnx", "Sentence", **parameters)
+        with patch.object(self.ui, "_comparison_sources", return_value={"a": ("Model", None), "b": ("Checkpoint", "run")}), \
+             patch.object(self.ui, "synthesize_model", return_value=("a.wav", "Generated")) as synth, \
+             patch.object(self.ui, "generate_checkpoint_sample", return_value=("b.wav", "Generated", "voice.zip", {})) as generate:
+            result = self.ui.compare_voices("project", "Voice", "a", "b", "Sentence", **parameters)
+        synth.assert_called_once_with("a", "Sentence", **parameters)
+        generate.assert_called_once_with("project", "run", "Voice", "b", "Sentence", **parameters)
+        self.assertIn("noise_w=0.4", result[2])
+
+    def test_invalid_speech_settings_do_not_export_a_checkpoint(self):
+        with patch.object(self.ui, "export_run") as export:
+            result = self.ui.generate_checkpoint_sample("project", "run", "Voice", "last.ckpt", "Sentence", length_scale=0)
+        export.assert_not_called()
+        self.assertIsNone(result[0])
+        self.assertIn("length_scale", result[1])
 
     def test_comparison_choices_include_saved_models_and_real_epoch_checkpoints(self):
         project = self.store.create_project("Narrator")

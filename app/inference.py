@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 import urllib.error
@@ -9,11 +10,31 @@ import urllib.request
 from pathlib import Path
 
 
-def synthesize(model: Path, config: Path, text: str, output: Path) -> Path:
+def synthesis_parameters(noise_scale=None, noise_w=None, length_scale=None) -> dict[str, float]:
+    """Omitted overrides preserve the voice config's inference defaults."""
+    parameters = {}
+    for name, raw in {"noise_scale": noise_scale, "noise_w": noise_w, "length_scale": length_scale}.items():
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{name} must be a number") from None
+        if not math.isfinite(value) or value < 0 or (name == "length_scale" and value == 0):
+            raise ValueError(f"{name} must be finite and {'positive' if name == 'length_scale' else 'non-negative'}")
+        parameters[name] = value
+    return parameters
+
+
+def synthesize(model: Path, config: Path, text: str, output: Path,
+               noise_scale=None, noise_w=None, length_scale=None) -> Path:
     if not text.strip():
         raise ValueError("enter text to synthesize")
+    command = [sys.executable, "-m", "piper", "-m", str(model), "-c", str(config), "-f", str(output)]
+    for name, value in synthesis_parameters(noise_scale, noise_w, length_scale).items():
+        command.extend(["--" + name.replace("_", "-"), str(value)])
     result = subprocess.run(
-        [sys.executable, "-m", "piper", "-m", str(model), "-c", str(config), "-f", str(output), "--", text],
+        [*command, "--", text],
         capture_output=True, text=True, check=False,
     )
     if result.returncode:

@@ -24,7 +24,7 @@ from app.bundles import export_bundle, import_bundle
 from app.checkpoints import download_checkpoint
 from app.datasets import create_dataset, saved_split_indices
 from app.export import export_onnx, package_model, package_training_run, publish_model, snapshot_checkpoint, validate_voice_name
-from app.inference import synthesize
+from app.inference import synthesis_parameters, synthesize
 from app.projects import ProjectStore
 from app.recording_review import review_rows
 from app.text import estimate_text, parse_prompts, prompt_recommendation
@@ -829,7 +829,7 @@ def model_choices(project_id: str):
     return pairs
 
 
-def synthesize_model(model_path: str, text: str):
+def synthesize_model(model_path: str, text: str, noise_scale=None, noise_w=None, length_scale=None):
     try:
         if not model_path:
             raise ValueError("Select a saved voice or generate a checkpoint sample first")
@@ -837,20 +837,28 @@ def synthesize_model(model_path: str, text: str):
         (DATA_DIR / "exports").mkdir(parents=True, exist_ok=True)
         output = DATA_DIR / "exports" / f"test-{uuid.uuid4().hex}.wav"
         config = model.with_name(model.name + ".json")
-        return str(synthesize(model, config, text, output)), "Speech generated locally."
+        parameters = synthesis_parameters(noise_scale, noise_w, length_scale)
+        audio = synthesize(model, config, text, output, **parameters)
+        settings = ", ".join(f"{name}={value:g}" for name, value in parameters.items()) or "model defaults"
+        return str(audio), f"Speech generated locally using {settings}."
     except Exception as error:
         return None, f"Synthesis failed: {error}"
 
 
-def generate_checkpoint_sample(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None, text: str):
+def generate_checkpoint_sample(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None, text: str,
+                               noise_scale=None, noise_w=None, length_scale=None):
     """One user action exports exactly the selected checkpoint and speaks the test text."""
     if not text or not text.strip():
         return None, "Enter text for your listening test.", None, gr.update(value=None)
+    try:
+        parameters = synthesis_parameters(noise_scale, noise_w, length_scale)
+    except ValueError as error:
+        return None, f"Speech not generated: {error}", None, gr.update(value=None)
     label = next((label for label, path in checkpoint_choices(project_id, run_id) if path == checkpoint_path), "Latest checkpoint")
     archive, message, model_update = export_run(project_id, run_id, voice_name, checkpoint_path)
     if not archive:
         return None, message, None, gr.update(value=None)
-    audio, speech_message = synthesize_model(model_update["value"], text)
+    audio, speech_message = synthesize_model(model_update["value"], text, **parameters)
     status = f"Run **{run_id[:8]}** · **{label}**. {speech_message}"
     return audio, status, archive, model_update
 
@@ -901,7 +909,8 @@ def refresh_voice_comparison(project_id: str, selected_a: str | None = None, sel
                            interactive=bool(choices)) for selected in (selected_a, selected_b))
 
 
-def compare_voices(project_id: str, voice_name: str, source_a: str, source_b: str, text: str):
+def compare_voices(project_id: str, voice_name: str, source_a: str, source_b: str, text: str,
+                   noise_scale=None, noise_w=None, length_scale=None):
     try:
         sources = _comparison_sources(project_id)
         if not source_a or not source_b or source_a == source_b:
@@ -910,17 +919,19 @@ def compare_voices(project_id: str, voice_name: str, source_a: str, source_b: st
             raise ValueError("Selected model or checkpoint is no longer available in this project. Refresh the choices.")
         if not text or not text.strip():
             raise ValueError("Enter text for your listening test.")
+        parameters = synthesis_parameters(noise_scale, noise_w, length_scale)
         audio = []
         for source in (source_a, source_b):
             _, run_id = sources[source]
             if run_id is None:
-                sample, status = synthesize_model(source, text)
+                sample, status = synthesize_model(source, text, **parameters)
             else:
-                sample, status, _, _ = generate_checkpoint_sample(project_id, run_id, voice_name, source, text)
+                sample, status, _, _ = generate_checkpoint_sample(project_id, run_id, voice_name, source, text, **parameters)
             if not sample:
                 raise ValueError(status)
             audio.append(sample)
-        return *audio, f"A: {sources[source_a][0]}\n\nB: {sources[source_b][0]}\n\nBoth read the same test text."
+        settings = ", ".join(f"{name}={value:g}" for name, value in parameters.items()) or "each model's defaults"
+        return *audio, f"A: {sources[source_a][0]}\n\nB: {sources[source_b][0]}\n\nBoth read the same test text using {settings}."
     except Exception as error:
         return None, None, f"Comparison failed: {error}"
 
