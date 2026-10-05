@@ -103,6 +103,34 @@ class GuidedUITests(unittest.TestCase):
         picker_ids = {item["id"] for item in app.config["components"] if item["props"].get("label") in {"Trained voice run", "Saved checkpoint"}}
         self.assertTrue(any(picker_ids.issubset(set(event["outputs"])) for event in app.config["dependencies"]
                             if any(target[0] in timer_ids for target in event["targets"])))
+        components = app.config["components"]
+        workspace = next(item for item in components if item["props"].get("label") == "Training workspace")
+        self.assertEqual(workspace["props"]["value"], "Setup")
+        text = next(item for item in components if item["props"].get("label") == "Shared listening text")
+        reference = next(item for item in components if item["props"].get("label") == "Original recording")
+        self.assertTrue(any(reference["id"] in event["outputs"] for event in app.config["dependencies"]
+                            if any(target[0] == text["id"] and target[1] == "input" for target in event["targets"])))
+
+    def test_metrics_distinguish_missing_readings_from_zero_and_escape_labels(self):
+        from app.ui import training_summary
+        state = {"run_id": "run-1234", "status": "training", "config": {"device": "cuda"},
+                 "progress": {"current_epoch": 3, "completed_epochs": 2, "max_epochs": 10,
+                              "losses": [{"series": "Training", "loss": 2.125}]},
+                 "performance": {"elapsed_seconds": 45, "average_epoch_seconds": 12,
+                                 "samples_per_second": 8.5, "estimate": {"remaining_seconds": 120}},
+                 "hardware": {"cpu": {"total_percent": 0}, "gpu": {"name": "<script>bad</script>"}}}
+        summary = training_summary(state)
+        for value in ("45 sec", "12 sec", "2 min", "8.50 samples/s", "2.1250", "20%", "0%"):
+            self.assertIn(value, summary)
+        self.assertIn("&lt;script&gt;bad&lt;/script&gt;", summary)
+        self.assertNotIn("<script>", summary)
+        self.assertNotIn("0.0 / 0.0 GiB", summary)
+        self.assertEqual(summary.count('class="metric-card"'), 8)
+
+    def test_reference_empty_state_explains_optional_comparison(self):
+        project = self.store.create_project("No reference")
+        self.assertIn("Select a run", self.ui.reference_help(project["id"], None))
+        self.assertIn("No held-out", self.ui.reference_help(project["id"], "saved"))
 
     def test_forward_navigation_returns_inline_help_when_not_ready(self):
         update, message = self.ui.navigate_step(None, 1, 2)

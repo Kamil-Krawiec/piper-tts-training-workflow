@@ -90,8 +90,8 @@ Compose defaults to user/group `1000:1000`. If your Linux account uses different
 2. **Text:** Paste prose, upload a `.txt` file, or load a built-in prompt pack. Preview the prompts and estimated duration. You can edit prompt text before recording; existing takes retain their original text snapshot.
 3. **Record:** Read one displayed prompt, record it with the microphone, listen, and accept it or save it for review. Accepted samples are normalized to mono 22,050 Hz PCM WAV without denoising or compression. Switch to **Review recordings** to browse flagged takes or search all recordings, including imported dataset clips. Listen, then choose **Keep**, **Re-record**, or **Reject**. Expand **Comparison and review details** to compare a saved dataset copy with the original and see how much edge audio was removed. A large cut is a reason to listen, not proof of damaged speech. Imported bundles do not contain untrimmed originals. Build a new dataset to apply review decisions; existing datasets remain unchanged and saved split membership is preserved for replacements.
 4. **Dataset:** Build a 15-minute, 30-minute, 60-minute, custom-duration, or all-accepted dataset, or import a dataset ZIP. Dataset creation trims long leading and trailing silence from training copies, keeps about 0.25 seconds at each end of speech, and leaves the saved recordings unchanged. Duration targets use the trimmed copies. Export a ZIP here to move to a GPU host. Fixed validation and test recordings stay the same across target sizes. Training uses the saved split membership directly: training recordings update the model, validation recordings provide validation loss, and test recordings remain held out. No second random split is applied. Existing exported dataset ZIPs remain compatible.
-5. **Train:** Choose fine-tuning or full training, supply a checkpoint if fine-tuning, choose your device, review the run summary, and start. The saved epoch bar and loss chart refresh while the page is open. Recent logs remain available under the chart.
-6. **Voice:** Select a run and checkpoint, enter test text, and click **Generate checkpoint sample**. The app exports that checkpoint automatically, plays its speech, and offers the ONNX plus JSON voice ZIP. Each sample keeps a separate export. Comparisons and API publishing are available in expandable sections.
+5. **Train:** Use **Setup** to choose a dataset, training mode, checkpoint and epoch cap, then review and start. **Metrics** shows saved epoch progress, training/validation loss, elapsed time, measured ETA, throughput and CPU/GPU usage. Timing, hardware details and logs stay in expandable panels. Metrics refresh every 10 seconds.
+6. **Voice:** Select a run and checkpoint. Choose a held-out **Reference sentence** and click **Load reference & matching text** to compare the original recording with generated checkpoint speech on the same words. Click **Generate checkpoint sample** to export and hear the checkpoint, then download its ONNX plus JSON ZIP. If no reference exists, enter your own text. The two players sit side by side on desktop and stack on mobile; generated A/B comparison, training downloads and API publishing remain in expandable panels.
 
 Each step reads from top to bottom and ends with Back/Continue navigation. Later steps unlock when their prerequisites are saved. **Resume saved progress** in Step 1 jumps to the next stage for an existing project. **Import a dataset ZIP** goes directly to Step 4 for the two-machine workflow. Switching projects clears temporary outputs from the previous workspace.
 
@@ -115,7 +115,7 @@ Start with **Auto** batch size, DataLoader workers, and CPU threads. CUDA batch 
 
 The Train step shows epoch progress, loss curves, throughput, hardware use, and an estimated finish time. Loss curves appear after logged batches; runtime estimates need enough measured batches and can change during training. Reopening the UI restores saved progress.
 
-In **Device and training settings**, set **Save checkpoint every X epochs** (default: 250). Each milestone is retained, so short intervals require more disk space. Training also saves a rolling checkpoint every 25 epochs, the checkpoint with the lowest validation mel reconstruction loss (`val_mel`), and a final checkpoint. Use the Voice step to compare checkpoints on the same listening sentences. Validation loss is a guide; choose your voice by listening.
+In **Advanced · device, performance and learning rates**, set **Save checkpoint every X epochs** (default: 250). Each milestone is retained, so short intervals require more disk space. Training also saves a rolling checkpoint every 25 epochs, the checkpoint with the lowest validation mel reconstruction loss (`val_mel`), and a final checkpoint. Use the Voice step to compare checkpoints on the same listening sentences. Validation loss is a guide; choose your voice by listening.
 
 Piper's individual training and validation losses are saved in the metrics CSV. Optional MOS scoring is disabled so training does not need to download another scoring model. The run diagnostics record the installed Piper version and revision.
 
@@ -127,7 +127,7 @@ The Voice step exports the selected checkpoint automatically when generating a l
 
 For a complete run archive, open **Download all training artifacts** after training finishes. It contains saved checkpoints, CSV metrics, hardware telemetry, logs and configuration. Keep the dataset ZIP from Step 4 separately. If an artifact changes during packaging, retry after training stops.
 
-In **Compare models or checkpoints**, choose **Voice A** and **Voice B**, then click **Generate A and B**. Each selector lists saved ONNX voice models and epoch checkpoints from all runs in the project. You can compare two models, two checkpoints, or one of each using the listening text above. The comparison selectors are independent of the single-checkpoint preview. Changing either selection or the text clears the previous comparison.
+In **Compare two generated voices · models or checkpoints**, choose **Voice A** and **Voice B**, then click **Generate A and B**. Each selector lists saved ONNX voice models and epoch checkpoints from all runs in the project. You can compare two models, two checkpoints, or one of each using the listening text above. The comparison selectors are independent of the single-checkpoint preview. Changing either selection or the text clears the previous comparison.
 
 To preserve training weights, open **Download checkpoint for further training** and prepare the selected `.ckpt` download. This makes a stable copy, including when you choose the rolling checkpoint. Keep the dataset ZIP as well. An ONNX voice is for speech generation and cannot be converted back into a full training checkpoint. Upload the `.ckpt` in Step 5 to start a new fine-tuning session from its weights; this does not resume the old epoch or optimizer state.
 
@@ -135,7 +135,7 @@ To preserve training weights, open **Download checkpoint for further training** 
 
 The trainer is the browser app for recording and training. The separate `kamilkrawiec/piper-openai-tts` image serves exported voices through an OpenAI-compatible speech API.
 
-When running from the repository, export a voice and click **Publish to Piper API shared directory**, then start the API:
+When running from the repository, export a voice and open **Advanced: filenames and API publishing** and click **Publish selected voice to Piper API**, then start the API:
 
 ```bash
 docker compose --profile inference up -d piper-api
@@ -174,6 +174,10 @@ data/
 ```
 
 Back up this directory to retain projects, recordings, bundles, logs, checkpoints, and models. Deleting a project or the `data` directory removes its stored voice data. Uploaded text, audio, checkpoint, dataset, and model files stay local by default.
+
+## Code organization
+
+The six workflow pages and their event wiring live in `app/pages.py`. Browser callbacks stay in `app/main.py`; metric presentation and theme styling live in `app/ui.py` and `app/ui.css`. Domain modules retain ownership of projects, datasets, training and export. See the [code review and module map](docs/code-review.md) for findings and the relevant files.
 
 ## Licensing
 
