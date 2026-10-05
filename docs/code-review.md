@@ -6,6 +6,7 @@ Reviewed the browser callbacks, project/recording persistence, dataset and ZIP v
 
 | Priority | Finding | Change |
 | --- | --- | --- |
+| Medium | Switching pages changed the document height and navigation forced a smooth scroll. | Use one viewport frame with scrollable page content and a fixed footer; remove forced navigation scrolling. |
 | Medium | Training setup, monitoring, hardware readings and diagnostics competed for attention in one long page. | Separate Setup and Metrics views in Step 5; readable metric cards, loss history and expandable diagnostics. |
 | Medium | The original recording was hidden inside the generated A/B comparison; unrelated text could remain beside the reference. | Step 6 pairs original speaker and checkpoint. Loading a reference updates the shared text; editing text clears the reference and generated samples. |
 | Medium | Completed epochs relied on validation CSV rows. Datasets without validation could show no completed epochs despite saved batch timing. | Job status also derives completed epochs from saved completed batches and batches per epoch. |
@@ -37,3 +38,5 @@ Reviewed the browser callbacks, project/recording persistence, dataset and ZIP v
 Run `python -m unittest discover -s tests -v` in the trainer image for the complete suite. Host-only runs skip tests requiring Piper/Lightning.
 
 Browser verification uses an isolated trainer container with copied dataset/metrics and a read-only saved checkpoint. Check desktop and 390 × 844 layouts in light/dark themes, restored loss plots, matching reference text, checkpoint synthesis, voice ZIP download and stale-audio clearing. No change to the running Compose service is required.
+
+Check page stability with `agent-browser eval --stdin < scripts/check-ui-layout.js` after selecting a saved dataset that unlocks all six pages. Run at desktop and mobile viewport sizes; the check rejects page/footer movement and viewport overflow.

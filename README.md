@@ -179,6 +179,8 @@ Back up this directory to retain projects, recordings, bundles, logs, checkpoint
 
 ## Code organization
 
+All six pages share a fixed viewport frame. Longer content scrolls inside the page while the step tabs and Back/Next buttons stay in place.
+
 The six workflow pages and their event wiring live in `app/pages.py`. Browser callbacks stay in `app/main.py`; metric presentation and theme styling live in `app/ui.py` and `app/ui.css`. Domain modules retain ownership of projects, datasets, training and export. See the [code review and module map](docs/code-review.md) for findings and the relevant files.
 
 ## Licensing
