@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 
 from app.performance import estimate_runtime
 
@@ -17,6 +17,31 @@ def _atomic_json(path: Path, value: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+class RunModelCheckpoint(ModelCheckpoint):
+    """Distinct roles must stay checkpointable even when their intervals match."""
+
+    def __init__(self, role: str, **kwargs):
+        self.role = role
+        super().__init__(**kwargs)
+
+    @property
+    def state_key(self) -> str:
+        return f"{super().state_key}:{self.role}"
+
+
+class LearningRateSchedule(Callback):
+    """Pinned Piper uses manual optimization, so Lightning never steps its schedulers."""
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        for label, optimizer in zip(("lr_g", "lr_d"), trainer.optimizers):
+            pl_module.log(label, optimizer.param_groups[0]["lr"], on_step=False, on_epoch=True)
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        if not pl_module.automatic_optimization:
+            for config in trainer.lr_scheduler_configs:
+                config.scheduler.step()
 
 
 class TrainingMetrics(Callback):
@@ -69,6 +94,7 @@ class TrainingMetrics(Callback):
         _atomic_json(self.path, {"elapsed_seconds": elapsed,
                                  "current_epoch": min(self.max_epochs, trainer.current_epoch + 1),
                                  "global_step": trainer.global_step,
+                                 "learning_rates": [optimizer.param_groups[0]["lr"] for optimizer in trainer.optimizers],
                                  "completed_batches": batches,
                                  "steps_per_epoch": self.steps_per_epoch,
                                  "total_optimizer_steps": total * 2,

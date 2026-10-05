@@ -20,12 +20,23 @@ def main() -> None:
     # PyTorch 2.6 rejects PosixPath in otherwise weights-only Piper checkpoints.
     # Keep weights_only=True and allow only this harmless metadata type.
     from piper.train import __main__ as piper_cli
+    from app.train_data import SavedSplitDataModule
+
+    piper_cli.VitsDataModule = SavedSplitDataModule
 
     base_cli = piper_cli.VitsLightningCLI
     model_parameters = inspect.signature(piper_cli.VitsModel.__init__).parameters
     logger = logging.getLogger(__name__)
 
     class CheckpointCompatibleCLI(base_cli):
+        def __init__(self, *args, **kwargs):
+            # The UI supplies its own checkpoint policy. Do not append upstream's
+            # additional mel/MOS checkpoints (MOS may be disabled or unavailable).
+            defaults = dict(kwargs.get("trainer_defaults", {}))
+            defaults.pop("callbacks", None)
+            kwargs["trainer_defaults"] = defaults
+            super().__init__(*args, **kwargs)
+
         def _parse_ckpt_path(self) -> None:
             """Load current model hparams, ignoring obsolete fields saved by old Piper."""
             if not self.config.get("subcommand"):
@@ -46,7 +57,8 @@ def main() -> None:
             hparams = {
                 name: value
                 for name, value in hparams.items()
-                if name in model_parameters or name == "_class_path"
+                if (name in model_parameters or name == "_class_path")
+                and name not in {"learning_rate", "learning_rate_d", "mos_metric"}
             }
             if not hparams:
                 return
@@ -78,6 +90,7 @@ def main() -> None:
                 hparams = self.model.hparams
                 epochs = int(config["max_epochs"])
                 config["effective_lr_schedule"] = {
+                    "stepping": "explicit-per-epoch",
                     "generator_initial_lr": float(hparams.learning_rate),
                     "discriminator_initial_lr": float(hparams.learning_rate_d),
                     "generator_per_epoch_decay": float(hparams.lr_decay),

@@ -54,7 +54,7 @@ class DatasetTests(unittest.TestCase):
         write_wav(dataset / "audio" / "one.wav")
         (dataset / "metadata.csv").write_text("one.wav|Tekst\n")
         (dataset / "dataset.json").write_text('{"schema_version":1,"sample_count":1,"total_seconds":1}')
-        (dataset / "sample-index.json").write_text('[{"sample_id":"sample-1","filename":"000001.wav","text":"Tekst","split":"train"}]')
+        (dataset / "sample-index.json").write_text('[{"sample_id":"sample-1","filename":"one.wav","text":"Tekst","split":"train"}]')
         (dataset / "project-info.json").write_text('{"language":"pl_PL","espeak_voice":"pl","sample_rate":22050}')
         (dataset / "splits").mkdir()
         (dataset / "splits" / "train.json").write_text('["sample-1"]')
@@ -63,6 +63,10 @@ class DatasetTests(unittest.TestCase):
         archive = export_bundle(dataset, self.root / "export.zip", {"language": "pl_PL"})
         imported = import_bundle(archive, self.root / "imported")
         self.assertEqual((imported / "audio" / "one.wav").stat().st_size, 44144)
+        (dataset / "sample-index.json").write_text('[{"sample_id":"sample-1","filename":"../outside.wav","text":"Tekst","split":"train"}]')
+        invalid_index = export_bundle(dataset, self.root / "invalid-index.zip", {"language": "pl_PL"})
+        with self.assertRaisesRegex(ValueError, "must match metadata"):
+            import_bundle(invalid_index, self.root / "invalid-index")
 
         import zipfile
         malicious = self.root / "bad.zip"
@@ -73,6 +77,25 @@ class DatasetTests(unittest.TestCase):
 
 
 class TrainingCommandTests(unittest.TestCase):
+    def test_checkpoint_interval_and_rates_are_validated_and_forwarded(self):
+        import json
+        base = {"voice_name": "voice", "csv_path": "/data/metadata.csv", "audio_dir": "/data/audio",
+                "sample_rate": 22050, "espeak_voice": "pl", "cache_dir": "/data/cache",
+                "config_path": "/data/config.json", "device": "cpu", "batch_size": 4,
+                "training_mode": "scratch", "checkpoint_interval": 7, "learning_rate": 0.0001,
+                "learning_rate_d": 0.00005}
+        command = build_training_command(base)
+        self.assertEqual(command[command.index("--model.learning_rate") + 1], "0.0001")
+        callbacks = json.loads(command[command.index("--trainer.callbacks") + 1])
+        intervals = [c["init_args"]["every_n_epochs"] for c in callbacks
+                     if c["class_path"].endswith("ModelCheckpoint") and c["init_args"].get("save_top_k") == -1]
+        self.assertEqual(intervals, [7])
+        self.assertTrue(any(c.get("init_args", {}).get("monitor") == "val_mel" for c in callbacks))
+        for field, invalid in [("checkpoint_interval", 0), ("checkpoint_interval", 2.5),
+                               ("learning_rate", 0), ("learning_rate_d", float("nan"))]:
+            with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                build_training_command({**base, field: invalid})
+
     def test_missing_finetune_checkpoint_returns_validation_help(self):
         errors = validate_training_config({"training_mode": "finetune", "checkpoint": None}, cuda_available=False)
         self.assertIn("Fine-tuning requires an existing checkpoint file.", errors)

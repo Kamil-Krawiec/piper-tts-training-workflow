@@ -8,6 +8,7 @@ import csv
 import shutil
 import zipfile
 import wave
+from app.datasets import saved_split_indices
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -136,7 +137,5 @@ def import_bundle(archive_path: Path, destination: Path) -> Path:
             raise ValueError("dataset bundle manifest summary does not match dataset.json")
         if manifest.get("project", {}).get("language") not in (None, project_info["language"]):
             raise ValueError("dataset bundle project metadata does not match project-info.json")
-        sample_index = json.loads((root / "sample-index.json").read_text(encoding="utf-8"))
-        if not isinstance(sample_index, list) or len(sample_index) != len(all_entries):
-            raise ValueError("sample-index.json must map every dataset metadata row")
+        saved_split_indices(root)
     return root

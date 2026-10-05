@@ -252,6 +252,41 @@ class ProjectStore:
                     db.execute("DELETE FROM project_state WHERE project_id=? AND key='active_prompt_id'", (_safe_id(project_id),))
         self._write_current_prompts(project_id)
 
+    def register_dataset_recordings(self, project_id: str, dataset: Path) -> int:
+        """Expose imported clips in the existing review workflow; leave files intact."""
+        from app.audio import inspect_wav
+
+        root = self.project_dir(project_id).resolve()
+        dataset = Path(dataset).resolve()
+        if not dataset.is_relative_to(root / "datasets"):
+            raise ValueError("Dataset must belong to this project")
+        index = json.loads((dataset / "sample-index.json").read_text(encoding="utf-8"))
+        added = 0
+        with self._connect() as db:
+            position = db.execute("SELECT COALESCE(MAX(position), -1) FROM prompts WHERE project_id=?", (project_id,)).fetchone()[0] + 1
+            for row in index:
+                source_id = row["sample_id"]
+                sample_id = str(uuid.uuid5(uuid.UUID(project_id), source_id))
+                existing = db.execute("SELECT id, quality_json FROM samples WHERE project_id=? AND id IN (?, ?)", (project_id, source_id, sample_id)).fetchone()
+                if existing:
+                    quality = json.loads(existing["quality_json"])
+                    quality.setdefault("source_split", row["split"])
+                    db.execute("UPDATE samples SET quality_json=? WHERE id=?", (json.dumps(quality), existing["id"]))
+                    continue
+                audio = (dataset / "audio" / row["filename"]).resolve()
+                if not audio.is_relative_to(dataset / "audio"):
+                    raise ValueError("Invalid dataset recording path")
+                prompt_id = str(uuid.uuid4())
+                quality = {**inspect_wav(audio), "imported": True, "source_sample_id": source_id,
+                           "source_split": row["split"], "source_dataset": dataset.name}
+                db.execute("INSERT INTO prompts(id, project_id, position, text) VALUES (?, ?, ?, ?)", (prompt_id, project_id, position, row["text"]))
+                db.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (sample_id, project_id, prompt_id, str(audio.relative_to(root)), quality["duration_seconds"],
+                            str(audio), row["text"], "accepted", json.dumps(quality), _now()))
+                position += 1
+                added += 1
+        return added
+
     def add_sample(self, project_id: str, prompt_id: str, raw_file: str, duration_seconds: float, status: str = "accepted", quality: dict[str, Any] | None = None, audio_file: str | None = None) -> str:
         if duration_seconds < 0:
             raise ValueError("duration must be non-negative")
@@ -260,6 +295,12 @@ class ProjectStore:
             prompt = db.execute("SELECT text FROM prompts WHERE id=? AND project_id=?", (prompt_id, _safe_id(project_id))).fetchone()
             if prompt is None:
                 raise KeyError("prompt not found")
+            quality = dict(quality or {})
+            previous = db.execute("SELECT quality_json FROM samples WHERE prompt_id=? ORDER BY created_at DESC LIMIT 1", (prompt_id,)).fetchone()
+            if previous:
+                split = json.loads(previous[0]).get("source_split")
+                if split:
+                    quality["source_split"] = split
             db.execute("UPDATE samples SET status='superseded' WHERE prompt_id=? AND status IN ('accepted','review','pending')", (prompt_id,))
             db.execute(
                 "INSERT INTO samples(id, project_id, prompt_id, raw_file, duration_seconds, audio_file, text_snapshot, status, quality_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -279,6 +320,12 @@ class ProjectStore:
         if status not in {"accepted", "review", "rejected"}:
             raise ValueError("invalid sample status")
         with self._connect() as db:
+            row = db.execute("SELECT quality_json FROM samples WHERE id=? AND project_id=?", (sample_id, _safe_id(project_id))).fetchone()
+            if row is None:
+                raise KeyError("sample not found")
+            quality = json.loads(row[0])
+            quality["reviewed"] = status == "accepted"
+            db.execute("UPDATE samples SET quality_json=? WHERE id=?", (json.dumps(quality), sample_id))
             result = db.execute("UPDATE samples SET status=? WHERE id=? AND project_id=?", (status, sample_id, _safe_id(project_id)))
             if result.rowcount != 1:
                 raise KeyError("sample not found")
