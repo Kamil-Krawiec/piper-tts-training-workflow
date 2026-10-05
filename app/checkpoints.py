@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import urllib.request
 from pathlib import Path
@@ -65,3 +66,26 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def inference_config(checkpoint: Path, config_path: str | None, cache_dir: Path) -> Path:
+    """Use this checkpoint's inference config, fetching only a known base voice's config."""
+    if checkpoint.suffix != ".ckpt" or not checkpoint.is_file() or not checkpoint.stat().st_size:
+        raise ValueError("Select an existing, nonempty .ckpt file")
+    candidates = [Path(config_path).resolve()] if config_path else [checkpoint.with_name("voice.onnx.json"), checkpoint.with_name("config.json")]
+    config = next((path for path in candidates if path.is_file()), None)
+    if config is None and not config_path:
+        for checkpoint_id, item in CHECKPOINTS.items():
+            if checkpoint == (cache_dir / checkpoint_id / "checkpoint.ckpt").resolve():
+                request = urllib.request.Request(item["config_source"], headers={"User-Agent": "piper-voice-trainer"})
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    data = json.load(response)
+                config = checkpoint.with_name("config.json")
+                config.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                break
+    if config is None:
+        raise ValueError("Matching Piper config is missing. Provide its JSON path, or place config.json beside the checkpoint.")
+    data = json.loads(config.read_text(encoding="utf-8"))
+    if not (data.get("audio", {}).get("sample_rate") and data.get("espeak", {}).get("voice") and data.get("phoneme_id_map")):
+        raise ValueError("Select a Piper inference config with audio, espeak and phoneme_id_map settings")
+    return config

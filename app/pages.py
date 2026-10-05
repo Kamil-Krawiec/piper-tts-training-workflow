@@ -214,6 +214,11 @@ def build_app(actions) -> gr.Blocks:
                             refresh_voice_button = gr.Button("Refresh checkpoints", scale=1)
                         checkpoint_select = gr.Dropdown(label="Saved checkpoint", value=None, interactive=False, filterable=False, info="Choose a milestone or the latest saved checkpoint.")
                         checkpoint_notice = gr.Markdown()
+                    with gr.Accordion("Use a checkpoint file instead · e.g. Polish Darkman", open=False):
+                        gr.Markdown("Generate from a base or imported training checkpoint without selecting a run. Paths refer to files inside the container’s data directory. Uses the shared listening text and speech settings below.")
+                        checkpoint_file = gr.Textbox(label="Checkpoint file path", value=str(actions.DATA_DIR / "checkpoints/pl_PL-darkman-medium/checkpoint.ckpt"))
+                        checkpoint_config = gr.Textbox(label="Matching Piper config path (optional)", placeholder="Auto: voice.onnx.json or config.json beside the checkpoint", info="For a trained checkpoint, use its run’s voice.onnx.json. Darkman’s pinned config is downloaded automatically if missing.")
+                        file_sample_button = gr.Button("Generate from checkpoint file", variant="primary")
                     gr.Markdown("### 2. Choose the words & listen")
                     local_test_text = gr.Textbox(label="Shared listening text", value="Dzisiaj sprawdzam własny model głosu.", lines=3, info="Load a reference sentence below, or type your own text to test the checkpoint.")
                     with gr.Accordion("Speech settings · variation and speed", open=False):
@@ -354,6 +359,9 @@ def build_app(actions) -> gr.Blocks:
         run_select.input(actions.refresh_checkpoints, [project_select, run_select], [checkpoint_select, export_model_button])
         speech_inputs = [noise_scale, noise_w, length_scale]
         export_model_button.click(actions.generate_checkpoint_sample, [project_select, run_select, model_name, checkpoint_select, local_test_text, *speech_inputs], [synth_audio, model_status, model_archive, model_select])
+        file_sample_button.click(actions.generate_checkpoint_file_sample, [project_select, model_name, checkpoint_file, checkpoint_config, local_test_text, *speech_inputs], [synth_audio, model_status, model_archive, model_select])
+        for field in (checkpoint_file, checkpoint_config):
+            field.input(lambda: (None, "", None), outputs=[synth_audio, model_status, model_archive])
         for setting in speech_inputs:
             setting.change(lambda: (None, "", None, None, ""), outputs=[synth_audio, model_status, compare_audio_a, compare_audio_b, comparison_status])
         checkpoint_select.change(lambda checkpoint: gr.update(interactive=bool(checkpoint)), checkpoint_select, checkpoint_download_button)

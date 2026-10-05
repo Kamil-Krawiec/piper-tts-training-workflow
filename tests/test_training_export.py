@@ -1,8 +1,9 @@
 """Durable run downloads preserve metrics and exclude temporary probe files."""
+import importlib.util
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PosixPath
 from unittest.mock import patch
 
 from app.export import package_training_run
@@ -34,3 +35,20 @@ class TrainingArchiveTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     package_training_run(root, archive)
             self.assertFalse(archive.exists())
+
+
+@unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+class ExportCompatibilityTests(unittest.TestCase):
+    def test_export_allows_legacy_path_metadata_with_weights_only_loading(self):
+        import torch
+        from app.export_cli import main
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy.ckpt"
+            torch.save({"hyper_parameters": {"dataset": PosixPath("/data/dataset")}}, checkpoint)
+            def upstream_export():
+                data = torch.load(checkpoint, weights_only=True)
+                self.assertEqual(data["hyper_parameters"]["dataset"], PosixPath("/data/dataset"))
+            with patch("piper.train.export_onnx.main", side_effect=upstream_export) as export:
+                main()
+                export.assert_called_once()
+            self.assertNotIn(PosixPath, torch.serialization.get_safe_globals())

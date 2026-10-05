@@ -8,6 +8,7 @@
   --studio-border: #d2dce1;
   --studio-accent: #176c60;
   --studio-accent-text: #176c60;
+  width: 100% !important;
   max-width: 1200px !important;
   margin: auto !important;
   font-family: ui-sans-serif, system-ui, sans-serif !important;

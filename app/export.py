@@ -38,7 +38,7 @@ def export_onnx(checkpoint: Path, config_json: Path, output_dir: Path, voice_nam
     model = root / f"{name}.onnx"
     config = root / f"{name}.onnx.json"
     result = subprocess.run(
-        [sys.executable, "-m", "piper.train.export_onnx", "--checkpoint", str(checkpoint), "--output-file", str(model)],
+        [sys.executable, str(Path(__file__).with_name("export_cli.py")), "--checkpoint", str(checkpoint), "--output-file", str(model)],
         cwd=root, capture_output=True, text=True, check=False,
     )
     if result.returncode:

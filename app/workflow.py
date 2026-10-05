@@ -24,8 +24,6 @@ class WorkflowProgress:
             return "Prepare and save your prompt queue in Step 2 first."
         if step == 5 and not self.datasets:
             return "Create or import a dataset in Step 4 first."
-        if step == 6 and not (self.datasets or self.runs or self.models):
-            return "Start a training run in Step 5 first. A saved checkpoint is needed to export a voice."
         return None
 
     @property

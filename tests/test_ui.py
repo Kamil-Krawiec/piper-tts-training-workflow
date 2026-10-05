@@ -302,6 +302,43 @@ class GuidedUITests(unittest.TestCase):
         self.assertIn("**1 sec** imported audio", summary)
         self.assertIn("**1** available recording", summary)
 
+    def test_checkpoint_file_generates_without_a_training_run(self):
+        project = self.store.create_project("Voice")
+        checkpoint = Path(self.temp.name) / "checkpoints/custom/my.voice.ckpt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"base weights")
+        config = checkpoint.with_name("config.json")
+        config.write_text('{"audio":{"sample_rate":22050},"espeak":{"voice":"pl"},"phoneme_id_map":{"a":[1]}}')
+        def export(snapshot, selected_config, output, name):
+            self.assertEqual(snapshot.read_bytes(), b"base weights")
+            self.assertEqual(selected_config, config)
+            output.mkdir(parents=True)
+            model = output / (name + ".onnx")
+            model.write_bytes(b"model")
+            copied = model.with_name(model.name + ".json")
+            copied.write_text(config.read_text())
+            return model, copied
+        with patch.object(self.ui, "export_onnx", side_effect=export), \
+             patch.object(self.ui, "synthesize_model", return_value=("sample.wav", "Generated")) as synth:
+            result = self.ui.generate_checkpoint_file_sample(project["id"], "Voice", str(checkpoint), "", "Sentence", 0.3, 0.4, 1.2)
+        self.assertEqual(result[0], "sample.wav", result[1])
+        self.assertTrue(Path(result[2]).is_file())
+        synth.assert_called_once_with(result[3]["value"], "Sentence", noise_scale=0.3, noise_w=0.4, length_scale=1.2)
+        self.assertIn("my.voice.ckpt", result[1])
+
+    def test_checkpoint_file_rejects_missing_config_and_outside_data(self):
+        project = self.store.create_project("Voice")
+        checkpoint = Path(self.temp.name) / "custom.ckpt"
+        checkpoint.write_bytes(b"weights")
+        with patch.object(self.ui, "export_onnx") as export:
+            result = self.ui.generate_checkpoint_file_sample(project["id"], "Voice", str(checkpoint), "", "Sentence")
+            self.assertIsNone(result[0])
+            self.assertIn("config", result[1].lower())
+            result = self.ui.generate_checkpoint_file_sample(project["id"], "Voice", "/outside/checkpoint.ckpt", "", "Sentence")
+            self.assertIsNone(result[0])
+            self.assertIn("data directory", result[1])
+            export.assert_not_called()
+
     def test_generate_sample_uses_selected_checkpoint_export(self):
         model = Path(self.temp.name) / "selected.onnx"
         with patch.object(self.ui, "export_run", return_value=("voice.zip", "Exported", {"value": str(model)})) as export, \

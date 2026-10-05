@@ -21,7 +21,7 @@ import pandas as pd
 
 from app.audio import inspect_wav, normalize_audio, trim_edge_silence
 from app.bundles import export_bundle, import_bundle
-from app.checkpoints import download_checkpoint
+from app.checkpoints import download_checkpoint, inference_config
 from app.datasets import create_dataset, saved_split_indices
 from app.export import export_onnx, package_model, package_training_run, publish_model, snapshot_checkpoint, validate_voice_name
 from app.inference import synthesis_parameters, synthesize
@@ -792,28 +792,32 @@ def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: s
             raise ValueError("Select a training run")
         chosen = _selected_checkpoint(project_id, run_id, checkpoint_path)
         config = run_dir / "voice.onnx.json"
-        validate_voice_name(voice_name)
-        export_name = voice_name[:40] + f"-{run_id[:8]}"
-        epoch = re.search(r"^(?:best-)?epoch[-=](\d+)", chosen.stem)
-        if epoch:
-            export_name += f"-epoch-{int(epoch[1]) + 1}"
-        else:
-            export_name += f"-{chosen.stem}"
-        export_name += f"-{uuid.uuid4().hex[:8]}"
-        export_name = validate_voice_name(export_name)
-        output = STORE.project_dir(project_id) / "models" / export_name
-        # Export a snapshot so the rolling checkpoint can advance during training.
-        with tempfile.TemporaryDirectory(prefix="piper-checkpoint-") as temporary:
-            snapshot = Path(temporary) / chosen.name
-            snapshot_checkpoint(chosen, snapshot)
-            model, config_file = export_onnx(snapshot, config, output, export_name)
-        archive = DATA_DIR / "exports" / f"{export_name}.piper-model.zip"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        package_model(model, config_file, archive)
-        choices = model_choices(project_id)
-        return str(archive), f"Exported model pair: {model.name} ({model.stat().st_size:,} bytes) and {config_file.name} ({config_file.stat().st_size:,} bytes).", gr.update(choices=choices, value=str(model))
+        return _export_checkpoint(project_id, chosen, config, voice_name, run_id)
     except Exception as error:
         return None, f"ONNX export failed: {error}", gr.update()
+
+
+def _export_checkpoint(project_id: str, chosen: Path, config: Path, voice_name: str, source_id: str):
+    validate_voice_name(voice_name)
+    export_name = voice_name[:40] + f"-{source_id[:8]}"
+    epoch = re.search(r"^(?:best-)?epoch[-=](\d+)", chosen.stem)
+    if epoch:
+        export_name += f"-epoch-{int(epoch[1]) + 1}"
+    else:
+        export_name += f"-{re.sub(r'[^A-Za-z0-9_-]', '-', chosen.stem)[:20]}"
+    export_name += f"-{uuid.uuid4().hex[:8]}"
+    export_name = validate_voice_name(export_name)
+    output = STORE.project_dir(project_id) / "models" / export_name
+    # Export a snapshot so the rolling checkpoint can advance during training.
+    with tempfile.TemporaryDirectory(prefix="piper-checkpoint-") as temporary:
+        snapshot = Path(temporary) / chosen.name
+        snapshot_checkpoint(chosen, snapshot)
+        model, config_file = export_onnx(snapshot, config, output, export_name)
+    archive = DATA_DIR / "exports" / f"{export_name}.piper-model.zip"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    package_model(model, config_file, archive)
+    choices = model_choices(project_id)
+    return str(archive), f"Exported model pair: {model.name} ({model.stat().st_size:,} bytes) and {config_file.name} ({config_file.stat().st_size:,} bytes).", gr.update(choices=choices, value=str(model))
 
 
 def model_choices(project_id: str):
@@ -845,8 +849,31 @@ def synthesize_model(model_path: str, text: str, noise_scale=None, noise_w=None,
         return None, f"Synthesis failed: {error}"
 
 
+def export_checkpoint_file(project_id: str, voice_name: str, checkpoint_path: str, config_path: str | None):
+    try:
+        if not STORE.has_project(project_id):
+            raise ValueError("Choose a project first")
+        chosen = Path(checkpoint_path or "").resolve()
+        if not chosen.is_relative_to(DATA_DIR.resolve()):
+            raise ValueError("Checkpoint must be inside the data directory")
+        if config_path and not Path(config_path).resolve().is_relative_to(DATA_DIR.resolve()):
+            raise ValueError("Piper config must be inside the data directory")
+        config = inference_config(chosen, config_path, DATA_DIR / "checkpoints")
+        if not config.resolve().is_relative_to(DATA_DIR.resolve()):
+            raise ValueError("Piper config must be inside the data directory")
+        return _export_checkpoint(project_id, chosen, config, voice_name, "file")
+    except Exception as error:
+        return None, f"ONNX export failed: {error}", gr.update()
+
+
+def generate_checkpoint_file_sample(project_id: str, voice_name: str, checkpoint_path: str, config_path: str,
+                                    text: str, noise_scale=None, noise_w=None, length_scale=None):
+    return generate_checkpoint_sample(project_id, None, voice_name, checkpoint_path, text,
+                                      noise_scale, noise_w, length_scale, from_file=True, config_path=config_path)
+
+
 def generate_checkpoint_sample(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None, text: str,
-                               noise_scale=None, noise_w=None, length_scale=None):
+                               noise_scale=None, noise_w=None, length_scale=None, *, from_file=False, config_path=None):
     """One user action exports exactly the selected checkpoint and speaks the test text."""
     if not text or not text.strip():
         return None, "Enter text for your listening test.", None, gr.update(value=None)
@@ -855,11 +882,13 @@ def generate_checkpoint_sample(project_id: str, run_id: str, voice_name: str, ch
     except ValueError as error:
         return None, f"Speech not generated: {error}", None, gr.update(value=None)
     label = next((label for label, path in checkpoint_choices(project_id, run_id) if path == checkpoint_path), "Latest checkpoint")
-    archive, message, model_update = export_run(project_id, run_id, voice_name, checkpoint_path)
+    archive, message, model_update = (export_checkpoint_file(project_id, voice_name, checkpoint_path, config_path)
+                                    if from_file else export_run(project_id, run_id, voice_name, checkpoint_path))
     if not archive:
         return None, message, None, gr.update(value=None)
     audio, speech_message = synthesize_model(model_update["value"], text, **parameters)
-    status = f"Run **{run_id[:8]}** · **{label}**. {speech_message}"
+    source = f"Checkpoint file **{Path(checkpoint_path).parent.name} · {Path(checkpoint_path).name}**" if from_file else f"Run **{run_id[:8]}** · **{label}**"
+    status = f"{source}. {speech_message}"
     return audio, status, archive, model_update
 
 

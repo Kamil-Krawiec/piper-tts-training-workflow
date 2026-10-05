@@ -6,9 +6,10 @@ Reviewed the browser callbacks, project/recording persistence, dataset and ZIP v
 
 | Priority | Finding | Change |
 | --- | --- | --- |
-| Medium | Switching pages changed the document height and navigation forced a smooth scroll. | Use one viewport frame with scrollable page content and a fixed footer; remove forced navigation scrolling. |
+| Medium | Switching pages changed the document height and navigation forced a smooth scroll. | Set an explicit outer-container width and one viewport frame with scrollable page content and a fixed footer; remove forced navigation scrolling. |
 | Medium | Training setup, monitoring, hardware readings and diagnostics competed for attention in one long page. | Separate Setup and Metrics views in Step 5; readable metric cards, loss history and expandable diagnostics. |
 | Medium | The original recording was hidden inside the generated A/B comparison; unrelated text could remain beside the reference. | Step 6 pairs original speaker and checkpoint. Loading a reference updates the shared text; editing text clears the reference and generated samples. |
+| Medium | Voice could only export checkpoints registered in a project run; the legacy Darkman checkpoint also needs a safe metadata allowlist during export. | Add checkpoint-file generation with its matching config, reuse export/synthesis, and allow only PosixPath metadata while retaining weights-only loading. |
 | Medium | Completed epochs relied on validation CSV rows. Datasets without validation could show no completed epochs despite saved batch timing. | Job status also derives completed epochs from saved completed batches and batches per epoch. |
 | Low | Missing GPU/memory measurements appeared as zero; sub-minute epochs rounded to zero minutes. | Missing values are explicit, seconds remain readable, and finished runs with no timing say “Not recorded.” |
 | Low | Layout and callback logic shared a 1,476-line entrypoint, while CSS repeated theme values. | Move layout/event wiring to `pages.py`, metric presentation to `ui.py`, and theme tokens to `ui.css`. Keep domain logic and saved formats in their existing modules. |
@@ -39,4 +40,4 @@ Run `python -m unittest discover -s tests -v` in the trainer image for the compl
 
 Browser verification uses an isolated trainer container with copied dataset/metrics and a read-only saved checkpoint. Check desktop and 390 × 844 layouts in light/dark themes, restored loss plots, matching reference text, checkpoint synthesis, voice ZIP download and stale-audio clearing. No change to the running Compose service is required.
 
-Check page stability with `agent-browser eval --stdin < scripts/check-ui-layout.js` after selecting a saved dataset that unlocks all six pages. Run at desktop and mobile viewport sizes; the check rejects page/footer movement and viewport overflow.
+Check page stability with `agent-browser eval --stdin < scripts/check-ui-layout.js` after selecting a saved dataset that unlocks all six pages. Run at desktop viewport sizes including 1920 × 1080, 1440 × 900 and 1280 × 900; the check rejects changes in width, horizontal position, page/footer height and viewport overflow.

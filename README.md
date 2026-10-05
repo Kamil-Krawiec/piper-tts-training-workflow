@@ -129,6 +129,8 @@ Open **Speech settings · variation and speed** to adjust `noise_scale` (voice v
 
 For a complete run archive, open **Download all training artifacts** after training finishes. It contains saved checkpoints, CSV metrics, hardware telemetry, logs and configuration. Keep the dataset ZIP from Step 4 separately. If an artifact changes during packaging, retry after training stops.
 
+To test a base or imported checkpoint, open **Use a checkpoint file instead · e.g. Polish Darkman** in Voice. Enter its container path, such as `/data/checkpoints/pl_PL-darkman-medium/checkpoint.ckpt`, and click **Generate from checkpoint file**. The checkpoint must already exist inside the data directory. A project is required; a training run or dataset is not. The app uses `voice.onnx.json` or `config.json` beside the checkpoint, or the matching JSON path you provide. For Darkman, its pinned config is fetched automatically if absent. For a checkpoint copied from your training run, provide that run's `voice.onnx.json`. The generated voice appears in the same player, ZIP download and saved-model comparison choices.
+
 In **Compare two generated voices · models or checkpoints**, choose **Voice A** and **Voice B**, then click **Generate A and B**. Each selector lists saved ONNX voice models and epoch checkpoints from all runs in the project. You can compare two models, two checkpoints, or one of each using the listening text above. The comparison selectors are independent of the single-checkpoint preview. Changing either selection or the text clears the previous comparison.
 
 To preserve training weights, open **Download checkpoint for further training** and prepare the selected `.ckpt` download. This makes a stable copy, including when you choose the rolling checkpoint. Keep the dataset ZIP as well. An ONNX voice is for speech generation and cannot be converted back into a full training checkpoint. Upload the `.ckpt` in Step 5 to start a new fine-tuning session from its weights; this does not resume the old epoch or optimizer state.
@@ -179,7 +181,7 @@ Back up this directory to retain projects, recordings, bundles, logs, checkpoint
 
 ## Code organization
 
-All six pages share a fixed viewport frame. Longer content scrolls inside the page while the step tabs and Back/Next buttons stay in place.
+All six pages share a fixed viewport frame and the same width, independent of their content. Longer content scrolls inside the page while the step tabs and Back/Next buttons stay in place.
 
 The six workflow pages and their event wiring live in `app/pages.py`. Browser callbacks stay in `app/main.py`; metric presentation and theme styling live in `app/ui.py` and `app/ui.css`. Domain modules retain ownership of projects, datasets, training and export. See the [code review and module map](docs/code-review.md) for findings and the relevant files.
 

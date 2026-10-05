@@ -5,7 +5,7 @@
   const visible = selector => [...document.querySelectorAll(selector)].find(element => element.getBoundingClientRect().height > 0);
   const bounds = element => {
     const box = element.getBoundingClientRect();
-    return {top: box.top, height: box.height, bottom: box.bottom};
+    return {top: box.top, height: box.height, bottom: box.bottom, left: box.left, width: box.width, right: box.right};
   };
   const measurements = [];
   for (const step of [3, 4, 1, 2, 5, 6, 3]) {
@@ -27,11 +27,11 @@
     if (Math.abs(bounds(page).top - measurements[0].top) > 1) throw new Error('Scrolling moves the workspace.');
   }
   for (const value of measurements) {
-    for (const key of ['top', 'height', 'bottom', 'footer']) {
+    for (const key of ['top', 'height', 'bottom', 'left', 'width', 'right', 'footer']) {
       if (Math.abs(value[key] - measurements[0][key]) > 1) {
         throw new Error(`Step ${value.step} changes the workspace ${key}.`);
       }
     }
   }
-  return {viewport: [innerWidth, innerHeight], measurements, result: 'Stable pages and footer; no viewport overflow'};
+  return {viewport: [innerWidth, innerHeight], measurements, result: 'Stable page width, position and footer; no viewport overflow'};
 })()

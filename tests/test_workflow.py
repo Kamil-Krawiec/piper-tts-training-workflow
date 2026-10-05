@@ -14,6 +14,7 @@ class WorkflowProgressTests(unittest.TestCase):
         progress = WorkflowProgress(project=True)
         self.assertIsNone(progress.blocked_reason(2))
         self.assertIsNone(progress.blocked_reason(4))
+        self.assertIsNone(progress.blocked_reason(6))
         self.assertIn("Step 2", progress.blocked_reason(3))
         self.assertIn("Step 4", progress.blocked_reason(5))
 
