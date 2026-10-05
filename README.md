@@ -127,7 +127,7 @@ The Voice step exports the selected checkpoint automatically when generating a l
 
 For a complete run archive, open **Download all training artifacts** after training finishes. It contains saved checkpoints, CSV metrics, hardware telemetry, logs and configuration. Keep the dataset ZIP from Step 4 separately. If an artifact changes during packaging, retry after training stops.
 
-Open **Compare two checkpoints** to compare the selected checkpoint (A) with checkpoint B using identical text. Changing either checkpoint or the text clears the previous comparison.
+In **Compare models or checkpoints**, choose **Voice A** and **Voice B**, then click **Generate A and B**. Each selector lists saved ONNX voice models and epoch checkpoints from all runs in the project. You can compare two models, two checkpoints, or one of each using the listening text above. The comparison selectors are independent of the single-checkpoint preview. Changing either selection or the text clears the previous comparison.
 
 To preserve training weights, open **Download checkpoint for further training** and prepare the selected `.ckpt` download. This makes a stable copy, including when you choose the rolling checkpoint. Keep the dataset ZIP as well. An ONNX voice is for speech generation and cannot be converted back into a full training checkpoint. Upload the `.ckpt` in Step 5 to start a new fine-tuning session from its weights; this does not resume the old epoch or optimizer state.
 

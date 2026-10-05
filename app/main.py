@@ -255,7 +255,7 @@ def select_project_state(project_id: str | None):
         *select_project(selected),
         gr.update(choices=run_options, value=run_options[0][1] if run_options else None),
         gr.update(choices=model_options, value=model_options[0][1] if model_options else None),
-        gr.update(choices=model_options, value=None),
+        *refresh_voice_comparison(selected),
     )
 
 
@@ -854,18 +854,6 @@ def download_training_run(project_id: str, run_id: str):
         return None, f"Training ZIP failed: {error}"
 
 
-def compare_checkpoints(project_id: str, run_id: str, voice_name: str, checkpoint_a: str, checkpoint_b: str, text: str):
-    if not checkpoint_a or not checkpoint_b or checkpoint_a == checkpoint_b:
-        return None, None, "Choose two different checkpoints from this run."
-    audio_a, status_a, _, _ = generate_checkpoint_sample(project_id, run_id, voice_name, checkpoint_a, text)
-    if not audio_a:
-        return None, None, status_a
-    audio_b, status_b, _, _ = generate_checkpoint_sample(project_id, run_id, voice_name, checkpoint_b, text)
-    if not audio_b:
-        return None, None, status_b
-    return audio_a, audio_b, f"A: {status_a}\n\nB: {status_b}"
-
-
 def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None = None):
     try:
         if not run_id:
@@ -961,17 +949,43 @@ def load_run_evaluation_prompt(project_id: str, run_id: str, sample_id: str):
     return load_evaluation_prompt(project_id, run_dataset(project_id, run_id), sample_id)
 
 
-def compare_models(model_a: str, model_b: str, text: str):
+def _comparison_sources(project_id: str):
+    sources = {path: (f"Saved model · {label}", None) for label, path in model_choices(project_id)}
+    for run_label, run_id in run_choices(project_id):
+        for label, path in checkpoint_choices(project_id, run_id):
+            sources[path] = (f"Checkpoint · {label} · {run_label.split(' · ')[0]} · run {run_id[:8]}", run_id)
+    return sources
+
+
+def refresh_voice_comparison(project_id: str, selected_a: str | None = None, selected_b: str | None = None):
+    sources = _comparison_sources(project_id)
+    choices = [(label, path) for path, (label, _) in sources.items()]
+    return tuple(gr.update(choices=choices, value=selected if selected in sources else None,
+                           interactive=bool(choices)) for selected in (selected_a, selected_b))
+
+
+def compare_voices(project_id: str, voice_name: str, source_a: str, source_b: str, text: str):
     try:
-        if not model_a or not model_b:
-            raise ValueError("Select two exported models")
-        output_a = DATA_DIR / "exports" / f"compare-a-{uuid.uuid4().hex}.wav"
-        output_b = DATA_DIR / "exports" / f"compare-b-{uuid.uuid4().hex}.wav"
-        synthesize(Path(model_a), Path(model_a).with_name(Path(model_a).name + ".json"), text, output_a)
-        synthesize(Path(model_b), Path(model_b).with_name(Path(model_b).name + ".json"), text, output_b)
-        return str(output_a), str(output_b), "Both models generated the same text locally."
+        sources = _comparison_sources(project_id)
+        if not source_a or not source_b or source_a == source_b:
+            raise ValueError("Choose two different models or checkpoints for A and B.")
+        if source_a not in sources or source_b not in sources:
+            raise ValueError("Selected model or checkpoint is no longer available in this project. Refresh the choices.")
+        if not text or not text.strip():
+            raise ValueError("Enter text for your listening test.")
+        audio = []
+        for source in (source_a, source_b):
+            _, run_id = sources[source]
+            if run_id is None:
+                sample, status = synthesize_model(source, text)
+            else:
+                sample, status, _, _ = generate_checkpoint_sample(project_id, run_id, voice_name, source, text)
+            if not sample:
+                raise ValueError(status)
+            audio.append(sample)
+        return *audio, f"A: {sources[source_a][0]}\n\nB: {sources[source_b][0]}\n\nBoth read the same test text."
     except Exception as error:
-        return None, None, f"Model comparison failed: {error}"
+        return None, None, f"Comparison failed: {error}"
 
 
 def publish_selected(model_path: str):
@@ -1301,6 +1315,20 @@ def build_app() -> gr.Blocks:
                 model_status = gr.Markdown()
                 synth_audio = gr.Audio(label="Checkpoint sample", interactive=False)
                 model_archive = gr.File(label="Download this voice (ONNX + JSON ZIP)", interactive=False)
+                with gr.Accordion("Compare models or checkpoints", open=True):
+                    gr.Markdown("Choose A and B below. Compare saved voice models, epoch checkpoints, or one of each—even from different runs. Both read the listening text above.")
+                    with gr.Row():
+                        comparison_a = gr.Dropdown(label="Voice A · model or checkpoint", choices=[], value=None, interactive=False)
+                        comparison_b = gr.Dropdown(label="Voice B · model or checkpoint", choices=[], value=None, interactive=False)
+                    compare_button = gr.Button("Generate A and B", interactive=False)
+                    comparison_status = gr.Markdown()
+                    with gr.Row():
+                        compare_audio_a = gr.Audio(label="Voice A", interactive=False)
+                        compare_audio_b = gr.Audio(label="Voice B", interactive=False)
+                    with gr.Accordion("Use an original recording as reference", open=False):
+                        fixed_test_prompt = gr.Dropdown(label="Reference sentence from the run selected above", choices=[], value=None)
+                        load_fixed_prompt_button = gr.Button("Use reference sentence & recording", interactive=False)
+                        reference_audio = gr.Audio(label="Original speaker recording", interactive=False)
                 with gr.Accordion("Download checkpoint for further training", open=False):
                     gr.Markdown("Save the selected .ckpt file to fine-tune it later or move training to another machine. Keep your dataset ZIP too.")
                     checkpoint_download_button = gr.Button("Prepare checkpoint download", interactive=False)
@@ -1311,19 +1339,8 @@ def build_app() -> gr.Blocks:
                     training_zip_button = gr.Button("Prepare training ZIP")
                     training_zip_status = gr.Markdown()
                     training_zip = gr.File(label="Training artifacts ZIP", interactive=False)
-                with gr.Accordion("Compare two checkpoints", open=False):
-                    comparison_checkpoint = gr.Dropdown(label="Checkpoint B", choices=[], value=None, interactive=False)
-                    gr.Markdown("Checkpoint A is the saved checkpoint selected above. Both read the same test text.")
-                    fixed_test_prompt = gr.Dropdown(label="Reference sentence from this run’s dataset", choices=[], value=None)
-                    load_fixed_prompt_button = gr.Button("Use reference sentence & recording", interactive=False)
-                    reference_audio = gr.Audio(label="Original speaker recording", interactive=False)
-                    comparison_status = gr.Markdown()
-                    compare_button = gr.Button("Compare checkpoints A and B", interactive=False)
-                    compare_audio_a = gr.Audio(label="Checkpoint A", interactive=False)
-                    compare_audio_b = gr.Audio(label="Checkpoint B", interactive=False)
                 with gr.Accordion("Advanced: filenames and API publishing", open=False):
                     model_select = gr.Dropdown(label="Saved voice for API publishing", choices=[], value=None)
-                    compare_model_select = gr.Dropdown(visible=False)
                     model_name = gr.Textbox(label="Voice name prefix", value="pl_PL-kamil-medium", info="Each export adds a run/checkpoint identifier and a unique suffix.")
                     gr.Markdown("Publish a generated or saved voice to your configured Piper API.")
                     publish_button = gr.Button("Publish first saved voice to Piper API", interactive=False)
@@ -1339,7 +1356,7 @@ def build_app() -> gr.Blocks:
         project_state_outputs = [
             project_status, queue_table, dataset_select, sample_select,
             queue_action_status, train_dataset, prompt_position, current_text,
-            prompt_progress, active_prompt_id, run_select, model_select, compare_model_select,
+            prompt_progress, active_prompt_id, run_select, model_select, comparison_a, comparison_b,
         ]
         stale_text = [comparison_status, checkpoint_notice, estimate, queue_status, source_status, record_result, sample_review_status, dataset_status, dataset_transfer_status, run_summary, training_status, model_status, publish_status, workflow_status, checkpoint_download_status, training_zip_status]
         stale_files = [sample_player, sample_audio_player, dataset_archive, dataset_import_file, model_archive, synth_audio, reference_audio, compare_audio_a, compare_audio_b, checkpoint_download, training_zip]
@@ -1427,20 +1444,18 @@ def build_app() -> gr.Blocks:
             picker.input(lambda: (None, ""), outputs=[checkpoint_download, checkpoint_download_status])
         run_select.change(refresh_run_reference, [project_select, run_select], fixed_test_prompt)
         run_select.change(lambda: None, outputs=reference_audio)
-        run_select.change(lambda: gr.update(value=None), outputs=comparison_checkpoint)
         fixed_test_prompt.change(lambda sample: gr.update(interactive=bool(sample)), fixed_test_prompt, load_fixed_prompt_button)
         training_zip_button.click(download_training_run, [project_select, run_select], [training_zip, training_zip_status])
         run_select.change(lambda: (None, ""), outputs=[training_zip, training_zip_status])
-        def refresh_comparison(pid, rid, selected):
-            choices = checkpoint_choices(pid, rid)
-            return gr.update(choices=choices, value=selected if selected in {v for _, v in choices} else None, interactive=bool(choices))
-        checkpoint_select.change(refresh_comparison, [project_select, run_select, comparison_checkpoint], comparison_checkpoint)
+        for trigger, event in ((refresh_voice_button, "click"), (voice_tab, "select")):
+            getattr(trigger, event)(refresh_voice_comparison, [project_select, comparison_a, comparison_b], [comparison_a, comparison_b])
+        model_select.change(refresh_voice_comparison, [project_select, comparison_a, comparison_b], [comparison_a, comparison_b])
         model_select.change(lambda model: gr.update(interactive=bool(model)), model_select, publish_button)
-        for picker in (checkpoint_select, comparison_checkpoint):
-            picker.change(lambda a, b: gr.update(interactive=bool(a and b and a != b)), [checkpoint_select, comparison_checkpoint], compare_button)
+        for picker in (comparison_a, comparison_b):
+            picker.change(lambda a, b: gr.update(interactive=bool(a and b and a != b)), [comparison_a, comparison_b], compare_button)
             picker.change(lambda: (None, None, ""), outputs=[compare_audio_a, compare_audio_b, comparison_status])
         local_test_text.change(lambda: (None, None, ""), outputs=[compare_audio_a, compare_audio_b, comparison_status])
-        compare_button.click(compare_checkpoints, [project_select, run_select, model_name, checkpoint_select, comparison_checkpoint, local_test_text], [compare_audio_a, compare_audio_b, comparison_status])
+        compare_button.click(compare_voices, [project_select, model_name, comparison_a, comparison_b, local_test_text], [compare_audio_a, compare_audio_b, comparison_status])
         publish_button.click(publish_selected, model_select, publish_status)
         dataset_select.change(lambda dataset: gr.update(value=dataset), dataset_select, train_dataset)
         train_dataset.input(lambda dataset: gr.update(value=dataset), train_dataset, dataset_select)

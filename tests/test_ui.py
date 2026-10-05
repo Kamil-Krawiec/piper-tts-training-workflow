@@ -280,15 +280,61 @@ class GuidedUITests(unittest.TestCase):
         self.assertEqual(result[2], "voice.zip")
         self.assertIn("run", result[1])
 
-    def test_comparison_uses_selected_checkpoints_and_clears_failure(self):
-        with patch.object(self.ui, "generate_checkpoint_sample", side_effect=[
-                ("a.wav", "A", "a.zip", {}), ("b.wav", "B", "b.zip", {})]) as generate:
-            result = self.ui.compare_checkpoints("project", "run", "Voice", "a.ckpt", "b.ckpt", "Sentence")
-        self.assertEqual(result[:2], ("a.wav", "b.wav"))
-        self.assertEqual([call.args[3] for call in generate.call_args_list], ["a.ckpt", "b.ckpt"])
-        with patch.object(self.ui, "generate_checkpoint_sample", return_value=(None, "Failed", None, {})):
-            self.assertEqual(self.ui.compare_checkpoints("p", "r", "V", "a", "b", "Text"), (None, None, "Failed"))
-        self.assertEqual(self.ui.compare_checkpoints("p", "r", "V", "a", "a", "Text")[:2], (None, None))
+    def test_comparison_choices_include_saved_models_and_real_epoch_checkpoints(self):
+        project = self.store.create_project("Narrator")
+        root = self.store.project_dir(project["id"])
+        model = root / "models/starting.onnx"
+        model.parent.mkdir(exist_ok=True)
+        model.write_bytes(b"model")
+        model.with_name("starting.onnx.json").write_text('{}')
+        for run_id, filename in (("earlier-run", "epoch=49-step=123.ckpt"), ("later-run", "best-epoch-0141.ckpt")):
+            checkpoint = root / "runs" / run_id / "checkpoints" / filename
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"checkpoint")
+            checkpoint.with_name("empty.ckpt").touch()
+        sources = self.ui._comparison_sources(project["id"])
+        self.assertEqual(len(sources), 3)
+        self.assertEqual(sources[str(model)], ("Saved model · starting", None))
+        self.assertTrue(any("After epoch 50" in label and run == "earlier-run" for label, run in sources.values()))
+        self.assertTrue(any("Best validation · After epoch 142" in label and run == "later-run" for label, run in sources.values()))
+        self.assertEqual(self.ui._comparison_sources(None), {})
+
+    def test_comparison_supports_models_and_checkpoints_across_runs(self):
+        sources = {"a.ckpt": ("Epoch 50", "run-a"), "b.ckpt": ("Epoch 142", "run-b"),
+                   "voice.onnx": ("Saved model", None), "other.onnx": ("Other model", None)}
+        for source_a, source_b in (("a.ckpt", "b.ckpt"), ("voice.onnx", "other.onnx"), ("voice.onnx", "b.ckpt")):
+            with self.subTest(a=source_a, b=source_b), \
+                 patch.object(self.ui, "_comparison_sources", return_value=sources), \
+                 patch.object(self.ui, "generate_checkpoint_sample", return_value=("checkpoint.wav", "Generated", "voice.zip", {})) as generate, \
+                 patch.object(self.ui, "synthesize_model", return_value=("model.wav", "Generated")) as synth:
+                result = self.ui.compare_voices("project", "Voice", source_a, source_b, "Sentence")
+                self.assertTrue(all(result[:2]))
+                self.assertIn(sources[source_a][0], result[2])
+                self.assertIn(sources[source_b][0], result[2])
+                self.assertEqual(generate.call_args_list, [unittest.mock.call("project", sources[source][1], "Voice", source, "Sentence")
+                                                          for source in (source_a, source_b) if sources[source][1]])
+                self.assertEqual(synth.call_args_list, [unittest.mock.call(source, "Sentence")
+                                                       for source in (source_a, source_b) if sources[source][1] is None])
+
+    def test_comparison_validates_both_sources_and_clears_failed_audio(self):
+        sources = {"a": ("A", "run"), "b": ("B", None)}
+        with patch.object(self.ui, "_comparison_sources", return_value=sources), \
+             patch.object(self.ui, "generate_checkpoint_sample", return_value=("a.wav", "OK", "a.zip", {})) as generate, \
+             patch.object(self.ui, "synthesize_model", return_value=(None, "Failed")):
+            for a, b, text in (("a", "a", "Text"), ("a", "outside-project", "Text"), ("a", "b", "  ")):
+                self.assertEqual(self.ui.compare_voices("p", "V", a, b, text)[:2], (None, None))
+            generate.assert_not_called()
+            result = self.ui.compare_voices("p", "V", "a", "b", "Text")
+            self.assertEqual(result, (None, None, "Comparison failed: Failed"))
+
+    def test_comparison_refresh_preserves_selections_and_drops_missing_sources(self):
+        with patch.object(self.ui, "_comparison_sources", return_value={"a": ("A", "run"), "b": ("B", None)}):
+            a, b = self.ui.refresh_voice_comparison("project", "a", "b")
+            self.assertEqual((a["value"], b["value"]), ("a", "b"))
+            self.assertEqual(a["choices"], [("A", "a"), ("B", "b")])
+            a, b = self.ui.refresh_voice_comparison("project", "deleted", "b")
+            self.assertIsNone(a["value"])
+            self.assertEqual(b["value"], "b")
 
     def test_empty_preview_text_does_not_export(self):
         with patch.object(self.ui, "export_run") as export:
