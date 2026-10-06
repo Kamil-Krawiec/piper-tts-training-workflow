@@ -6,7 +6,6 @@ import json
 import csv
 import math
 import os
-import shlex
 import signal
 import shutil
 import subprocess
@@ -261,6 +260,15 @@ class TrainingJobs:
                 if metrics.is_file():
                     try:
                         state["performance"] = json.loads(metrics.read_text(encoding="utf-8"))
+                        # Batch timing also tracks completed epochs when there is no validation split.
+                        timing = state["performance"]
+                        steps = timing.get("steps_per_epoch")
+                        if steps:
+                            completed = int(timing.get("completed_batches", 0)) // int(steps)
+                            state["progress"]["completed_epochs"] = min(state["progress"]["max_epochs"],
+                                max(state["progress"]["completed_epochs"], completed))
+                            state["progress"]["current_epoch"] = max(state["progress"]["current_epoch"],
+                                int(timing.get("current_epoch", completed)))
                     except (OSError, ValueError):
                         pass
                 hardware = run_dir / "hardware-metrics.jsonl"

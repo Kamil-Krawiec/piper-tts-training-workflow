@@ -103,6 +103,39 @@ class GuidedUITests(unittest.TestCase):
         picker_ids = {item["id"] for item in app.config["components"] if item["props"].get("label") in {"Trained voice run", "Saved checkpoint"}}
         self.assertTrue(any(picker_ids.issubset(set(event["outputs"])) for event in app.config["dependencies"]
                             if any(target[0] in timer_ids for target in event["targets"])))
+        components = app.config["components"]
+        workspace = next(item for item in components if item["props"].get("label") == "Training workspace")
+        self.assertEqual(workspace["props"]["value"], "Setup")
+        speech_controls = [item for item in components if (item["props"].get("label") or "").startswith(("noise_scale", "noise_w", "length_scale"))]
+        self.assertEqual(len(speech_controls), 3)
+        for control in speech_controls:
+            self.assertIsNone(control["props"].get("value"))
+            self.assertEqual(control["props"]["placeholder"], "Model default")
+        text = next(item for item in components if item["props"].get("label") == "Shared listening text")
+        reference = next(item for item in components if item["props"].get("label") == "Original recording")
+        self.assertTrue(any(reference["id"] in event["outputs"] for event in app.config["dependencies"]
+                            if any(target[0] == text["id"] and target[1] == "input" for target in event["targets"])))
+
+    def test_metrics_distinguish_missing_readings_from_zero_and_escape_labels(self):
+        from app.ui import training_summary
+        state = {"run_id": "run-1234", "status": "training", "config": {"device": "cuda"},
+                 "progress": {"current_epoch": 3, "completed_epochs": 2, "max_epochs": 10,
+                              "losses": [{"series": "Training", "loss": 2.125}]},
+                 "performance": {"elapsed_seconds": 45, "average_epoch_seconds": 12,
+                                 "samples_per_second": 8.5, "estimate": {"remaining_seconds": 120}},
+                 "hardware": {"cpu": {"total_percent": 0}, "gpu": {"name": "<script>bad</script>"}}}
+        summary = training_summary(state)
+        for value in ("45 sec", "12 sec", "2 min", "8.50 samples/s", "2.1250", "20%", "0%"):
+            self.assertIn(value, summary)
+        self.assertIn("&lt;script&gt;bad&lt;/script&gt;", summary)
+        self.assertNotIn("<script>", summary)
+        self.assertNotIn("0.0 / 0.0 GiB", summary)
+        self.assertEqual(summary.count('class="metric-card"'), 8)
+
+    def test_reference_empty_state_explains_optional_comparison(self):
+        project = self.store.create_project("No reference")
+        self.assertIn("Select a run", self.ui.reference_help(project["id"], None))
+        self.assertIn("No held-out", self.ui.reference_help(project["id"], "saved"))
 
     def test_forward_navigation_returns_inline_help_when_not_ready(self):
         update, message = self.ui.navigate_step(None, 1, 2)
@@ -222,6 +255,22 @@ class GuidedUITests(unittest.TestCase):
             archive, message, _ = self.ui.export_run(project["id"], "trained", "Narrator")
         self.assertIsNotNone(archive, message)
 
+    def test_metrics_download_uses_latest_running_run_without_checkpoint(self):
+        import zipfile
+        project = self.store.create_project("Narrator")
+        run = self.store.project_dir(project["id"]) / "runs" / "active"
+        metrics = run / "metrics/version_0/metrics.csv"
+        metrics.parent.mkdir(parents=True)
+        metrics.write_text("epoch,loss\n1,0.5\n")
+        (run / "status.json").write_text(json.dumps({"status": "training", "pid": os.getpid()}))
+        (run / "run-config.json").write_text(json.dumps({"max_epochs": 10}))
+        download, message = self.ui.download_training_metrics(project["id"])
+        self.assertIsNotNone(download, message)
+        with zipfile.ZipFile(download) as bundle:
+            self.assertEqual(bundle.namelist(), ["metrics/version_0/metrics.csv"])
+        rejected, message = self.ui.download_training_metrics(project["id"], "../outside")
+        self.assertIsNone(rejected)
+
     def test_checkpoint_download_copies_selected_weights_and_rejects_other_runs(self):
         project = self.store.create_project("Voice")
         run = self.store.project_dir(project["id"]) / "runs/trained"
@@ -269,6 +318,43 @@ class GuidedUITests(unittest.TestCase):
         self.assertIn("**1 sec** imported audio", summary)
         self.assertIn("**1** available recording", summary)
 
+    def test_checkpoint_file_generates_without_a_training_run(self):
+        project = self.store.create_project("Voice")
+        checkpoint = Path(self.temp.name) / "checkpoints/custom/my.voice.ckpt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"base weights")
+        config = checkpoint.with_name("config.json")
+        config.write_text('{"audio":{"sample_rate":22050},"espeak":{"voice":"pl"},"phoneme_id_map":{"a":[1]}}')
+        def export(snapshot, selected_config, output, name):
+            self.assertEqual(snapshot.read_bytes(), b"base weights")
+            self.assertEqual(selected_config, config)
+            output.mkdir(parents=True)
+            model = output / (name + ".onnx")
+            model.write_bytes(b"model")
+            copied = model.with_name(model.name + ".json")
+            copied.write_text(config.read_text())
+            return model, copied
+        with patch.object(self.ui, "export_onnx", side_effect=export), \
+             patch.object(self.ui, "synthesize_model", return_value=("sample.wav", "Generated")) as synth:
+            result = self.ui.generate_checkpoint_file_sample(project["id"], "Voice", str(checkpoint), "", "Sentence", 0.3, 0.4, 1.2)
+        self.assertEqual(result[0], "sample.wav", result[1])
+        self.assertTrue(Path(result[2]).is_file())
+        synth.assert_called_once_with(result[3]["value"], "Sentence", noise_scale=0.3, noise_w=0.4, length_scale=1.2)
+        self.assertIn("my.voice.ckpt", result[1])
+
+    def test_checkpoint_file_rejects_missing_config_and_outside_data(self):
+        project = self.store.create_project("Voice")
+        checkpoint = Path(self.temp.name) / "custom.ckpt"
+        checkpoint.write_bytes(b"weights")
+        with patch.object(self.ui, "export_onnx") as export:
+            result = self.ui.generate_checkpoint_file_sample(project["id"], "Voice", str(checkpoint), "", "Sentence")
+            self.assertIsNone(result[0])
+            self.assertIn("config", result[1].lower())
+            result = self.ui.generate_checkpoint_file_sample(project["id"], "Voice", "/outside/checkpoint.ckpt", "", "Sentence")
+            self.assertIsNone(result[0])
+            self.assertIn("data directory", result[1])
+            export.assert_not_called()
+
     def test_generate_sample_uses_selected_checkpoint_export(self):
         model = Path(self.temp.name) / "selected.onnx"
         with patch.object(self.ui, "export_run", return_value=("voice.zip", "Exported", {"value": str(model)})) as export, \
@@ -279,6 +365,27 @@ class GuidedUITests(unittest.TestCase):
         self.assertEqual(result[0], "sample.wav")
         self.assertEqual(result[2], "voice.zip")
         self.assertIn("run", result[1])
+
+    def test_speech_overrides_reach_checkpoint_and_both_comparison_voices(self):
+        parameters = {"noise_scale": 0.3, "noise_w": 0.4, "length_scale": 1.2}
+        with patch.object(self.ui, "export_run", return_value=("voice.zip", "Exported", {"value": "voice.onnx"})), \
+             patch.object(self.ui, "synthesize_model", return_value=("sample.wav", "Generated")) as synth:
+            self.ui.generate_checkpoint_sample("project", "run", "Voice", "last.ckpt", "Sentence", **parameters)
+        synth.assert_called_once_with("voice.onnx", "Sentence", **parameters)
+        with patch.object(self.ui, "_comparison_sources", return_value={"a": ("Model", None), "b": ("Checkpoint", "run")}), \
+             patch.object(self.ui, "synthesize_model", return_value=("a.wav", "Generated")) as synth, \
+             patch.object(self.ui, "generate_checkpoint_sample", return_value=("b.wav", "Generated", "voice.zip", {})) as generate:
+            result = self.ui.compare_voices("project", "Voice", "a", "b", "Sentence", **parameters)
+        synth.assert_called_once_with("a", "Sentence", **parameters)
+        generate.assert_called_once_with("project", "run", "Voice", "b", "Sentence", **parameters)
+        self.assertIn("noise_w=0.4", result[2])
+
+    def test_invalid_speech_settings_do_not_export_a_checkpoint(self):
+        with patch.object(self.ui, "export_run") as export:
+            result = self.ui.generate_checkpoint_sample("project", "run", "Voice", "last.ckpt", "Sentence", length_scale=0)
+        export.assert_not_called()
+        self.assertIsNone(result[0])
+        self.assertIn("length_scale", result[1])
 
     def test_comparison_choices_include_saved_models_and_real_epoch_checkpoints(self):
         project = self.store.create_project("Narrator")

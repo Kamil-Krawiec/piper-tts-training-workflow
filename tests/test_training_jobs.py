@@ -35,7 +35,7 @@ class TrainingJobsTests(unittest.TestCase):
         config = {"max_epochs": 2}
         jobs = TrainingJobs(self.root)
         with patch("app.training.build_training_command", return_value=[sys.executable, "-c", "pass"]), patch("app.training.subprocess.Popen", return_value=Mock(pid=os.getpid())):
-            run_id = jobs.start(self.project_id, config)
+            jobs.start(self.project_id, config)
         reopened = TrainingJobs(self.root)
         self.assertEqual(reopened.status(self.project_id)["status"], "training")
 
@@ -51,6 +51,15 @@ class TrainingJobsTests(unittest.TestCase):
         self.assertEqual(status["progress"]["completed_epochs"], 1)
         self.assertEqual(status["progress"]["max_epochs"], 10)
         self.assertEqual(len(status["progress"]["losses"]), 3)
+
+    def test_batch_metrics_track_completed_epochs_without_validation(self):
+        run = self.root / "projects" / self.project_id / "runs/run-1"
+        run.mkdir(parents=True)
+        (run / "status.json").write_text(json.dumps({"status": "training", "pid": os.getpid()}))
+        (run / "run-config.json").write_text(json.dumps({"max_epochs": 10}))
+        (run / "training-metrics.json").write_text(json.dumps({"steps_per_epoch": 4, "completed_batches": 11}))
+        status = TrainingJobs(self.root).status(self.project_id)
+        self.assertEqual(status["progress"]["completed_epochs"], 2)
 
     def test_permission_denied_still_means_process_exists(self):
         with patch("app.training.os.kill", side_effect=PermissionError):
