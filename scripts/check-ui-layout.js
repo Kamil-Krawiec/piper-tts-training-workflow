@@ -8,10 +8,10 @@
     return {top: box.top, height: box.height, bottom: box.bottom, left: box.left, width: box.width, right: box.right};
   };
   const measurements = [];
-  for (const step of [3, 4, 1, 2, 5, 6, 3]) {
+  for (const step of [3, 4, 1, 2, 5, 6, 7, 3]) {
     const tab = document.querySelector(`#workflow [role=tab][data-tab-id="${step}"]`);
     if (!tab || tab.getAttribute('aria-disabled') === 'true') {
-      throw new Error('Select a project with a saved dataset to check all six pages.');
+      throw new Error('Select a project with a saved dataset to check all seven pages.');
     }
     tab.click();
     await wait(300);

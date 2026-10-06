@@ -30,7 +30,8 @@ from app.recording_review import review_rows
 from app.text import estimate_text, parse_prompts, prompt_recommendation
 from app.training import TrainingJobs, batch_size_for, validate_training_config
 from app.performance import cpu_snapshot, effective_cpu_count, gpu_snapshot, physical_cpu_count, workers_for
-from app.workflow import WorkflowProgress
+from app.workflow import STEP_COUNT, WorkflowProgress
+from app.voices import import_voice, selected_voice, voice_choices
 from app.ui import training_summary
 
 
@@ -828,14 +829,40 @@ def _export_checkpoint(project_id: str, chosen: Path, config: Path, voice_name: 
 def model_choices(project_id: str):
     if not STORE.has_project(project_id):
         return []
-    root = STORE.project_dir(project_id) / "models"
-    pairs = []
-    if root.exists():
-        for config in root.rglob("*.onnx.json"):
-            model = config.with_name(config.name[:-5])
-            if model.exists():
-                pairs.append((model.stem, str(model)))
-    return pairs
+    return voice_choices(STORE.project_dir(project_id) / "models")
+
+
+def refresh_studio_voices(project_id: str, current: str | None = None):
+    choices = model_choices(project_id)
+    selected = current if current in {value for _, value in choices} else (choices[0][1] if choices else None)
+    return gr.update(choices=choices, interactive=bool(choices), **({"value": selected} if selected != current else {}))
+
+
+def import_studio_voice(project_id: str, uploads: list[str] | None):
+    try:
+        if not STORE.has_project(project_id):
+            raise ValueError("Choose or create a project in Step 1 first")
+        model = import_voice(uploads, STORE.project_dir(project_id) / "models")
+        return {**refresh_studio_voices(project_id), "value": str(model.resolve())}, "Voice imported. Enter text and generate audio."
+    except Exception as error:
+        return gr.update(), f"Could not import voice: {error}"
+
+
+def generate_studio_audio(project_id: str, model_path: str, text: str,
+                          noise_scale, noise_w, length_scale, request: str):
+    metadata = {"request": request}
+    try:
+        if not STORE.has_project(project_id):
+            raise ValueError("Choose or create a project in Step 1 first")
+        model = selected_voice(STORE.project_dir(project_id) / "models", model_path)
+        audio, message = synthesize_model(str(model), text, noise_scale, noise_w, length_scale)
+        if not audio:
+            raise ValueError(message)
+        with wave.open(audio, "rb") as wav:
+            metadata.update(sample_rate=wav.getframerate(), duration=wav.getnframes() / wav.getframerate())
+        return audio, {**metadata, "message": message}
+    except Exception as error:
+        return None, {**metadata, "message": f"Could not generate audio: {error}"}
 
 
 def synthesize_model(model_path: str, text: str, noise_scale=None, noise_w=None, length_scale=None):
@@ -1040,7 +1067,7 @@ def workflow_progress(project_id: str | None) -> WorkflowProgress:
 
 def step_availability(project_id: str | None):
     progress = workflow_progress(project_id)
-    return tuple(gr.update(interactive=progress.blocked_reason(step) is None) for step in range(1, 7))
+    return tuple(gr.update(interactive=progress.blocked_reason(step) is None) for step in range(1, STEP_COUNT + 1))
 
 
 def navigate_step(project_id: str | None, current: int, target: int):

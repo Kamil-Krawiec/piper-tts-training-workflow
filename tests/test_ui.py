@@ -15,6 +15,27 @@ from unittest.mock import patch
 
 @unittest.skipUnless(importlib.util.find_spec("gradio"), "Gradio is not installed")
 class GuidedUITests(unittest.TestCase):
+    def test_studio_import_selects_the_new_voice(self):
+        project = self.store.create_project("Studio")
+        model = Path(self.temp.name) / "new.onnx"
+        model.write_bytes(b"model")
+        config = model.with_name("new.onnx.json")
+        config.write_text('{"audio":{"sample_rate":22050},"espeak":{"voice":"pl"},"phoneme_id_map":{"a":[1]}}')
+        with patch("app.voices.validate_model"):
+            update, message = self.ui.import_studio_voice(project["id"], [str(model), str(config)])
+        self.assertIn("imported-", update["value"])
+        self.assertTrue(Path(update["value"]).is_file())
+        self.assertIn("imported", message)
+
+    def test_studio_generation_rejects_a_voice_outside_the_project(self):
+        project = self.store.create_project("Studio")
+        with patch.object(self.ui, "synthesize_model") as synth:
+            audio, metadata = self.ui.generate_studio_audio(project["id"], "/tmp/other.onnx", "Text", None, None, None, "request")
+        self.assertIsNone(audio)
+        self.assertEqual(metadata["request"], "request")
+        self.assertIn("Choose", metadata["message"])
+        synth.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -90,13 +111,13 @@ class GuidedUITests(unittest.TestCase):
         (dataset / "dataset.json").write_text('{"sample_count":1,"total_seconds":2}')
         self.assertIn("1 sample / 2 sec", self.ui._dataset_choices(project["id"])[0][0])
 
-    def test_fresh_ui_has_six_ordered_steps_and_starts_with_project(self):
+    def test_fresh_ui_has_seven_ordered_steps_and_starts_with_project(self):
         async def build():
             return self.ui.build_app()
         app = asyncio.run(build())
         tabs = [component for component in app.config["components"] if component["type"] == "tabitem"]
-        self.assertEqual([tab["props"]["label"] for tab in tabs], ["1 · Project", "2 · Text", "3 · Record", "4 · Dataset", "5 · Train", "6 · Voice"])
-        self.assertEqual([tab["props"]["interactive"] for tab in tabs], [True, False, False, False, False, False])
+        self.assertEqual([tab["props"]["label"] for tab in tabs], ["1 · Project", "2 · Text", "3 · Record", "4 · Dataset", "5 · Train", "6 · Voice", "7 · Studio"])
+        self.assertEqual([tab["props"]["interactive"] for tab in tabs], [True, False, False, False, False, False, False])
         selected = next(component for component in app.config["components"] if component["type"] == "tabs")
         self.assertEqual(selected["props"]["selected"], 1)
         timer_ids = {item["id"] for item in app.config["components"] if item["type"] == "timer"}

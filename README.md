@@ -135,6 +135,14 @@ In **Compare two generated voices · models or checkpoints**, choose **Voice A**
 
 To preserve training weights, open **Download checkpoint for further training** and prepare the selected `.ckpt` download. This makes a stable copy, including when you choose the rolling checkpoint. Keep the dataset ZIP as well. An ONNX voice is for speech generation and cannot be converted back into a full training checkpoint. Upload the `.ckpt` in Step 5 to start a new fine-tuning session from its weights; this does not resume the old epoch or optimizer state.
 
+### Generate and mix audio · Step 7
+
+Open **7 · Studio** after choosing a project. Select an exported voice, or import its ZIP / matching `.onnx` and `.onnx.json` files. Enter text and click **Generate audio**. Download the original WAV, or press **Play mix** and adjust pitch, warmth, air, saturation, compression, de-essing, reverb, stereo width, and gain while listening.
+
+**Hear original** compares the untouched source with your mix. **Restore defaults** restores the starting mix; **Reset to neutral** turns effects off. **Download mixed WAV** renders the complete clip using the current settings, including its reverb tail. Width affects stereo reverb; a dry Piper voice remains mono. These effects change the audio, not the trained voice model.
+
+Browser mixing supports clips up to five minutes and needs **localhost or HTTPS** with AudioWorklet support. Longer clips and unsupported browsers can still download the original. Imported voices belong to the selected project; uploads are limited to a self-contained model/config pair up to 1 GiB.
+
 ### Optional text-to-speech API
 
 The trainer is the browser app for recording and training. The separate `kamilkrawiec/piper-openai-tts` image serves exported voices through an OpenAI-compatible speech API.

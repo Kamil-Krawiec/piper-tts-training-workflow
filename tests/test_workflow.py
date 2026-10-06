@@ -4,6 +4,10 @@ from app.workflow import WorkflowProgress
 
 
 class WorkflowProgressTests(unittest.TestCase):
+    def test_studio_requires_only_a_project(self):
+        self.assertIn("Step 1", WorkflowProgress().blocked_reason(7))
+        self.assertIsNone(WorkflowProgress(project=True).blocked_reason(7))
+
     def test_first_visit_only_allows_project_step(self):
         progress = WorkflowProgress()
         self.assertIsNone(progress.blocked_reason(1))

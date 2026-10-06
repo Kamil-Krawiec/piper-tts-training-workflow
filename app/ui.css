@@ -1,4 +1,4 @@
-/* Theme tokens keep the six pages, metrics and audio cards consistent. */
+/* Theme tokens keep pages, metrics and audio cards consistent. */
 .gradio-container {
   --studio-bg: #f4f6f8;
   --studio-surface: #ffffff;
@@ -41,9 +41,9 @@ body.dark { background: #101820 !important; }
 #project-context p { margin: 0 !important; font-size: .88rem; }
 #workflow { margin-top: 0; }
 #workflow .tab-wrapper { height: auto !important; padding: 0 !important; }
-/* Gradio measures a single-row copy; keep all six steps in the wrapping grid. */
+/* Gradio measures a single-row copy; keep steps in the wrapping grid. */
 #workflow .tab-container[aria-hidden="true"] button { width: 0 !important; min-width: 0 !important; padding: 0 !important; border: 0 !important; font-size: 0 !important; }
-#workflow [role="tablist"] { display: grid !important; grid-template-columns: repeat(6, minmax(0, 1fr)); height: auto !important; overflow: visible !important; width: 100%; gap: 8px; border: 0 !important; padding: 0 !important; margin-bottom: 10px; }
+#workflow [role="tablist"] { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); height: auto !important; overflow: visible !important; width: 100%; gap: 8px; border: 0 !important; padding: 0 !important; margin-bottom: 10px; }
 #workflow [role="tablist"] button { border: 1px solid var(--studio-border) !important; border-radius: 12px !important; padding: 14px 8px !important; margin: 0 !important; background: var(--studio-surface) !important; color: var(--studio-text) !important; font-weight: 650; white-space: normal; }
 #workflow [role="tablist"] button[aria-selected="true"] { background: var(--studio-accent) !important; color: #fff !important; border-color: var(--studio-accent) !important; }
 #workflow [role="tablist"] button:disabled { opacity: .65 !important; cursor: not-allowed; }
@@ -115,3 +115,33 @@ body.dark { background: #101820 !important; }
 .step-footer > button { min-width: 0 !important; }
 .step-footer > button:only-child { grid-column: 1 / -1; }
 .step-content > * { flex-shrink: 0 !important; }
+
+#studio-mixer { color: var(--studio-text); }
+#studio-mixer fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+#studio-mixer fieldset:disabled { opacity: .55; }
+#studio-mixer button, #studio-original-download { border: 1px solid var(--studio-border); background: var(--studio-surface); color: var(--studio-text); padding: 10px 14px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; }
+#studio-mixer button:disabled { cursor: wait; }
+#studio-mixer .studio-primary { background: var(--studio-accent); color: white; margin-left: auto; }
+#studio-mixer button[aria-pressed="true"] { background: var(--studio-subtle); border-color: var(--studio-accent); }
+#studio-mixer :focus-visible { outline: 3px solid var(--studio-accent-text); outline-offset: 3px; }
+#studio-original { margin: 12px 0 24px; display: grid; gap: 10px; }
+#studio-original[hidden] { display: none; }
+#studio-original audio { width: 100%; }
+#studio-original-download { justify-self: start; text-decoration: none; }
+.studio-transport { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.studio-transport output { margin-left: auto; font-variant-numeric: tabular-nums; }
+#studio-mixer input[type="range"] { width: 100%; accent-color: var(--studio-accent); cursor: pointer; }
+.studio-effects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
+.studio-effect-group { background: var(--studio-subtle); border: 1px solid var(--studio-border); border-radius: 14px; padding: 16px; min-width: 0; }
+.studio-effect-group h4 { margin: 0 0 20px; color: var(--studio-accent-text); font-size: 1rem; }
+.studio-effect { margin-bottom: 22px; }
+.studio-effect:last-child { margin-bottom: 0; }
+.studio-effect > div { display: flex; justify-content: space-between; align-items: start; gap: 8px; font-size: .87rem; }
+.studio-effect output { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 650; }
+#studio-mixer .studio-effect p { font-size: .8rem; margin: 5px 0 8px; min-height: 2.6em; }
+.studio-mixer-note { font-size: .8rem; }
+.studio-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (max-width: 760px) {
+  .studio-effects { grid-template-columns: 1fr; }
+  #studio-mixer .studio-primary { margin-left: 0; }
+}

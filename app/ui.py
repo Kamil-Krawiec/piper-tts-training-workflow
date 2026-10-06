@@ -1,10 +1,11 @@
-"""Presentation for the six-page voice workflow; no project or job state."""
+"""Presentation for the voice workflow; no project or job state."""
 
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
 import gradio as gr
+from app.workflow import STEP_COUNT
 
 
 APP_CSS = Path(__file__).with_name("ui.css").read_text(encoding="utf-8")
@@ -12,7 +13,7 @@ APP_CSS = Path(__file__).with_name("ui.css").read_text(encoding="utf-8")
 
 def step_heading(number: int, title: str, description: str):
     gr.HTML(
-        f'<div class="step-count">Step {number} of 6</div>'
+        f'<div class="step-count">Step {number} of {STEP_COUNT}</div>'
         f"<h2>{title}</h2><p>{description}</p>",
         elem_classes="step-heading",
     )
