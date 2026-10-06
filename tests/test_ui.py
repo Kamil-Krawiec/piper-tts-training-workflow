@@ -255,6 +255,22 @@ class GuidedUITests(unittest.TestCase):
             archive, message, _ = self.ui.export_run(project["id"], "trained", "Narrator")
         self.assertIsNotNone(archive, message)
 
+    def test_metrics_download_uses_latest_running_run_without_checkpoint(self):
+        import zipfile
+        project = self.store.create_project("Narrator")
+        run = self.store.project_dir(project["id"]) / "runs" / "active"
+        metrics = run / "metrics/version_0/metrics.csv"
+        metrics.parent.mkdir(parents=True)
+        metrics.write_text("epoch,loss\n1,0.5\n")
+        (run / "status.json").write_text(json.dumps({"status": "training", "pid": os.getpid()}))
+        (run / "run-config.json").write_text(json.dumps({"max_epochs": 10}))
+        download, message = self.ui.download_training_metrics(project["id"])
+        self.assertIsNotNone(download, message)
+        with zipfile.ZipFile(download) as bundle:
+            self.assertEqual(bundle.namelist(), ["metrics/version_0/metrics.csv"])
+        rejected, message = self.ui.download_training_metrics(project["id"], "../outside")
+        self.assertIsNone(rejected)
+
     def test_checkpoint_download_copies_selected_weights_and_rejects_other_runs(self):
         project = self.store.create_project("Voice")
         run = self.store.project_dir(project["id"]) / "runs/trained"

@@ -191,6 +191,10 @@ def build_app(actions) -> gr.Blocks:
                         gr.Markdown("### Run metrics\nProgress, losses and measured performance refresh every 10 seconds. These readings belong to the latest run in this project.")
                         run_progress = gr.HTML("No training runs yet.")
                         run_chart = gr.LinePlot(x="epoch", y="loss", color="series", y_aggregate="mean", title="Loss over epochs", x_title="Epoch", y_title="Loss", height=260, visible=False)
+                        gr.Markdown("Download saved metrics at any time, including while training runs. Contains loss CSV, training performance and hardware readings only.")
+                        metrics_zip_button = gr.Button("Export metrics ZIP")
+                        metrics_zip_status = gr.Markdown()
+                        metrics_zip = gr.File(label="Metrics ZIP", interactive=False)
                         with gr.Accordion("Recent trainer logs", open=False):
                             run_status = gr.Code(label="Latest log lines", language="shell", value="No training runs yet.")
                         with gr.Accordion("Hardware diagnostics", open=False):
@@ -256,11 +260,6 @@ def build_app(actions) -> gr.Blocks:
                         checkpoint_download_button = gr.Button("Prepare checkpoint download", interactive=False)
                         checkpoint_download_status = gr.Markdown()
                         checkpoint_download = gr.File(label="Training checkpoint (.ckpt)", interactive=False)
-                    with gr.Accordion("Download all training artifacts", open=False):
-                        gr.Markdown("All saved checkpoints, CSV metrics, hardware metrics, logs and run configuration. Download after training finishes for a complete archive. Download the dataset ZIP separately in Step 4.")
-                        training_zip_button = gr.Button("Prepare training ZIP")
-                        training_zip_status = gr.Markdown()
-                        training_zip = gr.File(label="Training artifacts ZIP", interactive=False)
                     with gr.Accordion("Advanced: filenames and API publishing", open=False):
                         model_select = gr.Dropdown(label="Saved voice for API publishing", choices=[], value=None)
                         model_name = gr.Textbox(label="Voice name prefix", value="piper-voice", info="Each export adds a run/checkpoint identifier and a unique suffix.")
@@ -280,8 +279,8 @@ def build_app(actions) -> gr.Blocks:
             queue_action_status, train_dataset, prompt_position, current_text,
             prompt_progress, active_prompt_id, run_select, model_select, comparison_a, comparison_b,
         ]
-        stale_text = [reference_status, comparison_status, checkpoint_notice, estimate, queue_status, source_status, record_result, sample_review_status, dataset_status, dataset_transfer_status, run_summary, training_status, model_status, publish_status, workflow_status, checkpoint_download_status, training_zip_status]
-        stale_files = [sample_player, sample_audio_player, dataset_archive, dataset_import_file, model_archive, synth_audio, reference_audio, compare_audio_a, compare_audio_b, checkpoint_download, training_zip]
+        stale_text = [reference_status, comparison_status, checkpoint_notice, estimate, queue_status, source_status, record_result, sample_review_status, dataset_status, dataset_transfer_status, run_summary, training_status, model_status, publish_status, workflow_status, checkpoint_download_status, metrics_zip_status]
+        stale_files = [sample_player, sample_audio_player, dataset_archive, dataset_import_file, model_archive, synth_audio, reference_audio, compare_audio_a, compare_audio_b, checkpoint_download, metrics_zip]
         project_select.change(actions.select_project_state, project_select, project_state_outputs).then(
             actions.reset_project_view, project_select, [prompt_text, prompt_upload, parse_mode, recording, run_status],
         ).then(
@@ -374,8 +373,8 @@ def build_app(actions) -> gr.Blocks:
         run_select.change(lambda: None, outputs=reference_audio)
         fixed_test_prompt.input(lambda: (None, "Load this reference to update both the recording and shared text."), outputs=[reference_audio, reference_status])
         fixed_test_prompt.change(lambda sample: gr.update(interactive=bool(sample)), fixed_test_prompt, load_fixed_prompt_button)
-        training_zip_button.click(actions.download_training_run, [project_select, run_select], [training_zip, training_zip_status])
-        run_select.change(lambda: (None, ""), outputs=[training_zip, training_zip_status])
+        metrics_zip_button.click(actions.download_training_metrics, [project_select], [metrics_zip, metrics_zip_status])
+        project_select.change(lambda: (None, ""), outputs=[metrics_zip, metrics_zip_status])
         for trigger, event in ((refresh_voice_button, "click"), (voice_tab, "select")):
             getattr(trigger, event)(actions.refresh_voice_comparison, [project_select, comparison_a, comparison_b], [comparison_a, comparison_b])
         model_select.change(actions.refresh_voice_comparison, [project_select, comparison_a, comparison_b], [comparison_a, comparison_b])

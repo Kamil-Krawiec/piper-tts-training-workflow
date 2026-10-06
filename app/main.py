@@ -23,7 +23,7 @@ from app.audio import inspect_wav, normalize_audio, trim_edge_silence
 from app.bundles import export_bundle, import_bundle
 from app.checkpoints import download_checkpoint, inference_config
 from app.datasets import create_dataset, saved_split_indices
-from app.export import export_onnx, package_model, package_training_run, publish_model, snapshot_checkpoint, validate_voice_name
+from app.export import export_onnx, package_model, package_training_metrics, publish_model, snapshot_checkpoint, validate_voice_name
 from app.inference import synthesis_parameters, synthesize
 from app.projects import ProjectStore
 from app.recording_review import review_rows
@@ -769,18 +769,23 @@ def download_run_checkpoint(project_id: str, run_id: str, checkpoint_path: str |
         return None, f"Checkpoint download failed: {error}"
 
 
-def download_training_run(project_id: str, run_id: str):
+def download_training_metrics(project_id: str, run_id: str | None = None):
     try:
-        if not STORE.has_project(project_id) or not run_id:
-            raise ValueError("Select a training run")
+        if not STORE.has_project(project_id):
+            raise ValueError("Select a project")
+        if not run_id:
+            state = JOBS.status(project_id)
+            run_id = state["run_id"] if state else None
+        if not run_id:
+            raise ValueError("No training run available")
         runs = (STORE.project_dir(project_id) / "runs").resolve()
         run = (runs / run_id).resolve()
         if run.parent != runs or not run.is_dir():
             raise ValueError("Select an existing training run")
-        archive = DATA_DIR / "exports" / f"{run.name}-{uuid.uuid4().hex[:8]}.piper-training.zip"
-        return str(package_training_run(run, archive)), "Training ZIP ready: checkpoints, metrics, logs and configuration. Keep the dataset ZIP to resume training elsewhere."
+        archive = DATA_DIR / "exports" / f"{run.name}-{uuid.uuid4().hex[:8]}.piper-metrics.zip"
+        return str(package_training_metrics(run, archive)), "Metrics ZIP ready: saved loss metrics, training performance and hardware readings."
     except Exception as error:
-        return None, f"Training ZIP failed: {error}"
+        return None, f"Metrics export failed: {error}"
 
 
 def export_run(project_id: str, run_id: str, voice_name: str, checkpoint_path: str | None = None):

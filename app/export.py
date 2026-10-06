@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -64,20 +65,22 @@ def publish_model(model: Path, config: Path, voice_dir: Path) -> tuple[Path, Pat
     return destinations
 
 
-def package_training_run(run_dir: Path, archive: Path) -> Path:
-    """Archive durable run artifacts; reject files changing during the download."""
+def package_training_metrics(run_dir: Path, archive: Path) -> Path:
+    """Snapshot saved metrics, including completed rows from an active run."""
     run_dir, archive = Path(run_dir), Path(archive)
+    names = ("metrics/version_0/metrics.csv", "training-metrics.json", "hardware-metrics.jsonl")
+    files = [run_dir / name for name in names if (run_dir / name).is_file() and not (run_dir / name).is_symlink()]
+    if not files:
+        raise ValueError("No metrics have been saved yet. Try again after training starts logging.")
     archive.parent.mkdir(parents=True, exist_ok=True)
-    files = [p for p in run_dir.rglob("*") if p.is_file() and not p.is_symlink()
-             and "probe" not in p.relative_to(run_dir).parts and p.name != "pid"]
     try:
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            for path in sorted(files):
-                before = path.stat()
-                bundle.write(path, path.relative_to(run_dir).as_posix())
-                after = path.stat()
-                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-                    raise ValueError("Training artifacts changed while being archived. Retry after training stops.")
+            for path in files:
+                with path.open("rb") as stream:
+                    data = stream.read(os.fstat(stream.fileno()).st_size)
+                if path.suffix in (".csv", ".jsonl"):
+                    data = data[:data.rfind(b"\n") + 1]
+                bundle.writestr(path.relative_to(run_dir).as_posix(), data)
     except Exception:
         archive.unlink(missing_ok=True)
         raise
