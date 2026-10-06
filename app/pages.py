@@ -1,7 +1,10 @@
-"""Six workflow pages and their Gradio event wiring.
+"""Workflow pages and their Gradio event wiring.
 
 Callbacks stay in main; presentation and metrics styling stay in ui.
 """
+
+import json
+from pathlib import Path
 
 import gradio as gr
 
@@ -10,6 +13,8 @@ from app.ui import APP_CSS, step_heading
 
 
 def build_app(actions) -> gr.Blocks:
+    static_dir = Path(__file__).with_name("static").resolve()
+    gr.set_static_paths(paths=[static_dir])
     theme = gr.themes.Soft(primary_hue="teal", secondary_hue="slate", neutral_hue="slate").set(
         block_label_background_fill="transparent", block_label_text_color="#334953",
         body_text_color="#243743", body_text_color_subdued="#52616f",
@@ -266,12 +271,60 @@ def build_app(actions) -> gr.Blocks:
                         gr.Markdown("Publish a generated or saved voice to your configured Piper API.")
                         publish_button = gr.Button("Publish selected voice to Piper API", interactive=False)
                         publish_status = gr.Markdown()
+                    record_more = gr.Button("Record more")
                 with gr.Row(elem_classes="step-footer"):
                     back_voice = gr.Button("← Train")
-                    record_more = gr.Button("Record more")
+                    continue_studio = gr.Button("Next · Studio →", variant="primary")
+                forward_buttons.append((continue_studio, 6, 7))
                 back_buttons.extend([(back_voice, 5), (record_more, 3)])
+            with gr.Tab("7 · Studio", id=7, interactive=progress.blocked_reason(7) is None, elem_classes="step-page") as studio_tab:
+                with gr.Column(elem_classes="step-content", min_width=0):
+                    step_heading(7, "Generate & mix", "Choose a Piper voice, generate speech, then shape the sound while listening. Download the original or your finished mix.")
+                    with gr.Column(elem_classes="studio-panel"):
+                        gr.Markdown("### 1. Choose your voice")
+                        with gr.Row():
+                            studio_voice = gr.Dropdown(label="Exported or imported voice", choices=[], value=None, interactive=False, scale=3)
+                            studio_refresh = gr.Button("Refresh voices", scale=1)
+                        with gr.Accordion("Import a voice · ZIP or ONNX + JSON", open=False):
+                            studio_upload = gr.File(label="Voice ZIP or matching .onnx and .onnx.json files", file_count="multiple", file_types=[".zip", ".onnx", ".json"], type="filepath")
+                            studio_import = gr.Button("Import voice")
+                            studio_import_status = gr.Markdown()
+                    gr.Markdown("### 2. Generate audio")
+                    studio_text = gr.Textbox(label="Text to speak", value="Dzisiaj sprawdzam własny model głosu.", lines=3, elem_id="studio-text")
+                    with gr.Accordion("Speech settings · variation and speed", open=False):
+                        with gr.Row():
+                            studio_noise = gr.Number(value=None, placeholder="Model default", minimum=0, label="Voice variation · noise_scale")
+                            studio_timing = gr.Number(value=None, placeholder="Model default", minimum=0, label="Timing variation · noise_w")
+                            studio_speed = gr.Number(value=None, placeholder="Model default", minimum=.01, label="Speech speed · length_scale")
+                    studio_generate = gr.Button("Generate audio", variant="primary", interactive=False)
+                    studio_source = gr.File(visible=False)
+                    studio_result = gr.JSON(visible=False)
+                    studio_request = gr.Textbox(visible=False)
+                    gr.HTML('<div id="studio-mixer"><p>Generate audio to start mixing.</p></div>', elem_id="studio-mixer-host")
+                with gr.Row(elem_classes="step-footer"):
+                    studio_back = gr.Button("← Voice")
+                back_buttons.append((studio_back, 6))
         poll_signature = gr.State(None)
-        step_tabs = [project_tab, text_tab, record_tab, dataset_tab, train_tab, voice_tab]
+        step_tabs = [project_tab, text_tab, record_tab, dataset_tab, train_tab, voice_tab, studio_tab]
+
+        studio_inputs = [project_select, studio_voice, studio_text, studio_noise, studio_timing, studio_speed, studio_request]
+        studio_generate.click(actions.generate_studio_audio, studio_inputs, [studio_source, studio_result],
+                              js="(project, voice, text, noise, timing, speed) => [project, voice, text, noise, timing, speed, window.PiperStudio.beginGeneration()]").then(
+            fn=None, inputs=[studio_source, studio_result], js="(file, metadata) => window.PiperStudio.load(file, metadata)",
+        )
+        for field in (studio_text, studio_noise, studio_timing, studio_speed):
+            field.input(fn=None, js="() => window.PiperStudio?.invalidate()")
+        studio_voice.change(lambda voice: gr.update(interactive=bool(voice)), studio_voice, studio_generate)
+        studio_voice.change(fn=None, js="() => window.PiperStudio?.invalidate()")
+        studio_refresh.click(actions.refresh_studio_voices, [project_select, studio_voice], studio_voice)
+        studio_tab.select(actions.refresh_studio_voices, [project_select, studio_voice], studio_voice)
+        studio_import.click(actions.import_studio_voice, [project_select, studio_upload], [studio_voice, studio_import_status])
+        project_select.change(actions.refresh_studio_voices, project_select, studio_voice).then(
+            lambda: (None, ""), outputs=[studio_upload, studio_import_status],
+        )
+        project_select.change(fn=None, js="() => window.PiperStudio?.invalidate(true)")
+        demo.load(fn=None, js=f"async () => {{window.PiperStudio = await import(new URL('gradio_api/file=' + {json.dumps(str(static_dir / 'studio.js'))}, document.baseURI)); window.PiperStudio.mount();}}")
+        demo.load(actions.refresh_studio_voices, project_select, studio_voice)
 
         create_button.click(actions.create_project, [project_name, language, espeak], [project_select, project_status, create_status, project_create_panel])
         project_state_outputs = [

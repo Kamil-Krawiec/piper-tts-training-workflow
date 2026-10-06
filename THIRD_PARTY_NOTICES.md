@@ -4,3 +4,4 @@
 - The curated `pl_PL-darkman-medium` training checkpoint is hosted by [rhasspy/piper-checkpoints](https://huggingface.co/datasets/rhasspy/piper-checkpoints/tree/main/pl/pl_PL/darkman/medium), pinned to revision `6a9b3be`. The dataset repository declares MIT licensing. Review the model card and upstream repository before redistributing derived models.
 - The optional API container is `kamilkrawiec/piper-openai-tts:v1.0.2`; its source is [Kamil-Krawiec/piper-tts-http-server](https://github.com/Kamil-Krawiec/piper-tts-http-server).
 - The included demo prompts are original project text distributed under this repository's MIT license.
+- The browser mixer uses the unmodified AudioWorklet processor from [SoundTouchJS](https://github.com/cutterbl/SoundTouchJS), licensed under MPL-2.0. Its license is included at `app/static/SOUNDTOUCH-LICENSE`; `scripts/vendor-soundtouch.py` pins and verifies the upstream package used to reproduce this asset.

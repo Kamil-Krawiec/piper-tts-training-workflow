@@ -1,6 +1,8 @@
-"""Prerequisites for the six steps, shared by navigation and step availability."""
+"""Prerequisites shared by navigation and step availability."""
 
 from dataclasses import dataclass
+
+STEP_COUNT = 7
 
 
 @dataclass(frozen=True)
@@ -14,8 +16,8 @@ class WorkflowProgress:
     training: bool = False
 
     def blocked_reason(self, step: int) -> str | None:
-        if step not in range(1, 7):
-            raise ValueError("Workflow step must be between 1 and 6")
+        if step not in range(1, STEP_COUNT + 1):
+            raise ValueError(f"Workflow step must be between 1 and {STEP_COUNT}")
         if step == 1:
             return None
         if not self.project:
